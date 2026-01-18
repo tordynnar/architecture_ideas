@@ -659,3 +659,125 @@ OpenTelemetry C++ uses `nostd::shared_ptr` for reference counting. Be careful wi
 - Storing spans beyond their intended scope
 - Circular references between spans
 - Large numbers of concurrent spans (consider sampling)
+
+## Quick Reference: gRPC Server
+
+Minimal gRPC server method implementation with metrics, tracing, and logging:
+
+```cpp
+grpc::Status ProcessRequest(grpc::ServerContext* context,
+                            const myservice::MyRequest* request,
+                            myservice::MyResponse* response) override {
+    auto start_time = std::chrono::steady_clock::now();
+
+    // Metrics: track active requests
+    g_active_requests->Add(1, {{"method", "ProcessRequest"}});
+
+    // Tracing: extract context and create server span
+    GrpcServerCarrier carrier(context);
+    auto propagator = opentelemetry::context::propagation::GlobalTextMapPropagator::GetGlobalPropagator();
+    auto parent_ctx = propagator->Extract(carrier, opentelemetry::context::RuntimeContext::GetCurrent());
+
+    opentelemetry::trace::StartSpanOptions span_opts;
+    span_opts.kind = opentelemetry::trace::SpanKind::kServer;
+    span_opts.parent = opentelemetry::trace::GetSpan(parent_ctx)->GetContext();
+
+    auto span = g_tracer->StartSpan("grpc.server.ProcessRequest", {
+        {"rpc.system", "grpc"},
+        {"rpc.method", "ProcessRequest"},
+        {"request.id", request->id()},
+    }, span_opts);
+    auto scope = g_tracer->WithActiveSpan(span);
+    auto span_ctx = span->GetContext();
+
+    bool is_error = false;
+
+    // Logging: with trace context
+    LogWithContext(logs_api::Severity::kInfo, "Processing request: " + request->id(), &span_ctx);
+
+    // Tracing: manual span for business logic
+    auto biz_span = g_tracer->StartSpan("process-business-logic");
+    LogWithContext(logs_api::Severity::kInfo, "Executing business logic", &span_ctx);
+
+    // Execute business logic
+    try {
+        auto result = DoBusinessLogic(request);
+        response->set_result(result);
+        biz_span->SetStatus(opentelemetry::trace::StatusCode::kOk);
+    } catch (const std::exception& e) {
+        is_error = true;
+        biz_span->SetStatus(opentelemetry::trace::StatusCode::kError, e.what());
+        span->AddEvent("exception", {{"exception.message", e.what()}});
+        LogWithContext(logs_api::Severity::kError, std::string("Business logic failed: ") + e.what(), &span_ctx);
+    }
+    biz_span->End();
+
+    // Metrics: record request outcome
+    auto duration = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+    g_request_counter->Add(1, {{"method", "ProcessRequest"}, {"error", is_error ? "true" : "false"}});
+    g_request_duration->Record(duration, {{"method", "ProcessRequest"}, {"error", is_error ? "true" : "false"}});
+    g_active_requests->Add(-1, {{"method", "ProcessRequest"}});
+
+    span->SetStatus(is_error ? opentelemetry::trace::StatusCode::kError : opentelemetry::trace::StatusCode::kOk);
+    span->End();
+
+    LogWithContext(logs_api::Severity::kInfo, "Request completed", &span_ctx);
+    return is_error ? grpc::Status(grpc::StatusCode::INTERNAL, "Error") : grpc::Status::OK;
+}
+```
+
+## Quick Reference: gRPC Client Call
+
+Minimal gRPC client call with metrics, tracing, and logging:
+
+```cpp
+std::string CallService(const std::string& request_id) {
+    auto start_time = std::chrono::steady_clock::now();
+
+    // Tracing: create client span
+    opentelemetry::trace::StartSpanOptions span_opts;
+    span_opts.kind = opentelemetry::trace::SpanKind::kClient;
+
+    auto span = g_tracer->StartSpan("grpc.client.ProcessRequest", {
+        {"rpc.system", "grpc"},
+        {"rpc.service", "MyService"},
+        {"request.id", request_id},
+    }, span_opts);
+    auto scope = g_tracer->WithActiveSpan(span);
+    auto span_ctx = span->GetContext();
+
+    // Logging: with trace context
+    LogWithContext(logs_api::Severity::kInfo, "Calling service: " + request_id, &span_ctx);
+
+    grpc::ClientContext context;
+
+    // Tracing: inject context for propagation
+    GrpcClientCarrier carrier(&context);
+    auto propagator = opentelemetry::context::propagation::GlobalTextMapPropagator::GetGlobalPropagator();
+    propagator->Inject(carrier, opentelemetry::context::RuntimeContext::GetCurrent());
+
+    // Make gRPC call
+    myservice::MyRequest request;
+    request.set_id(request_id);
+    myservice::MyResponse response;
+    grpc::Status status = stub_->ProcessRequest(&context, request, &response);
+
+    // Metrics: record call outcome
+    auto duration = std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
+    bool is_error = !status.ok();
+    g_client_call_counter->Add(1, {{"service", "other-service"}, {"error", is_error ? "true" : "false"}});
+    g_client_call_duration->Record(duration, {{"service", "other-service"}, {"error", is_error ? "true" : "false"}});
+
+    // Tracing and logging: completion
+    if (status.ok()) {
+        span->SetStatus(opentelemetry::trace::StatusCode::kOk);
+        LogWithContext(logs_api::Severity::kInfo, "Service call completed", &span_ctx);
+    } else {
+        span->SetStatus(opentelemetry::trace::StatusCode::kError, status.error_message());
+        span->AddEvent("grpc_error", {{"grpc.status_code", static_cast<int>(status.error_code())}});
+        LogWithContext(logs_api::Severity::kError, "Service call failed: " + status.error_message(), &span_ctx);
+    }
+
+    span->End();
+    return response.result();
+}

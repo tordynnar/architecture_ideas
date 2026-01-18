@@ -601,3 +601,108 @@ void queue_span_for_export(span_t *span) {
     // Background thread processes queue
 }
 ```
+
+## Quick Reference: gRPC Server
+
+Minimal gRPC server handler with metrics, tracing, and logging:
+
+```c
+void process_request_handler(grpc_call *call, const char *request_id, trace_context_t *parent_ctx) {
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    // Metrics: track active requests
+    metrics_set_active_requests(1);
+
+    // Tracing: create server span
+    span_t *server_span = otel_start_span(parent_ctx, "grpc.server.ProcessRequest");
+
+    // Logging: with trace context
+    otel_log(parent_ctx, "INFO", "Processing request");
+
+    int is_error = 0;
+
+    // Tracing: manual span for business logic
+    span_t *biz_span = otel_start_span(parent_ctx, "process-business-logic");
+    otel_log(parent_ctx, "INFO", "Executing business logic");
+
+    // Execute business logic
+    int result = do_business_logic(request_id);
+
+    if (result != 0) {
+        is_error = 1;
+        otel_log(parent_ctx, "ERROR", "Business logic failed");
+    }
+
+    otel_end_span(biz_span, is_error);
+
+    // Calculate duration
+    struct timespec end_time;
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    double duration = (end_time.tv_sec - start_time.tv_sec) +
+                      (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+
+    // Metrics: record request outcome
+    metrics_increment_requests("ProcessRequest", is_error);
+    metrics_record_duration(duration);
+    metrics_set_active_requests(-1);
+
+    // Logging: completion
+    if (!is_error) {
+        otel_log(parent_ctx, "INFO", "Request completed successfully");
+    }
+
+    otel_end_span(server_span, is_error);
+}
+```
+
+## Quick Reference: gRPC Client Call
+
+Minimal gRPC client call with metrics, tracing, and logging:
+
+```c
+int call_service(const char *addr, const char *request_id, trace_context_t *ctx) {
+    struct timespec start_time;
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+
+    // Logging: with trace context
+    otel_log(ctx, "INFO", "Calling external service");
+
+    // Tracing: create client span
+    span_t *client_span = otel_start_span(ctx, "grpc.client.ProcessRequest");
+
+    // Inject trace context into metadata
+    // traceparent: 00-{trace_id}-{span_id}-01
+    char traceparent[128];
+    snprintf(traceparent, sizeof(traceparent), "00-%s-%s-01",
+             ctx->trace_id, client_span->span_id);
+
+    // Make gRPC call with traceparent metadata
+    grpc_metadata metadata;
+    metadata.key = "traceparent";
+    metadata.value = traceparent;
+
+    int result = grpc_call_service(addr, request_id, &metadata);
+
+    // Calculate duration
+    struct timespec end_time;
+    clock_gettime(CLOCK_MONOTONIC, &end_time);
+    double duration = (end_time.tv_sec - start_time.tv_sec) +
+                      (end_time.tv_nsec - start_time.tv_nsec) / 1e9;
+
+    int is_error = (result != 0);
+
+    // Metrics: record call outcome
+    metrics_increment_client_calls("other-service", is_error);
+    metrics_record_client_duration(duration);
+
+    // Logging and tracing: completion
+    if (is_error) {
+        otel_log(ctx, "ERROR", "Service call failed");
+    } else {
+        otel_log(ctx, "INFO", "Service call completed");
+    }
+
+    otel_end_span(client_span, is_error);
+    return result;
+}

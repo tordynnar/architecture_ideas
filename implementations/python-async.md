@@ -329,3 +329,120 @@ This helps trace the flow of async requests through the system.
    ```
 4. **Log before and after** long-running async operations
 5. **Use `try/finally`** to ensure metrics are recorded even on exceptions
+
+## Quick Reference: gRPC Server
+
+Minimal async gRPC server method implementation with metrics, tracing, and logging:
+
+```python
+class MyServiceImpl(MyServiceBase):
+    async def ProcessRequest(self, stream) -> None:
+        start_time = time.time()
+        request = await stream.recv_message()
+
+        # Metrics: track active requests
+        active_requests.add(1, {"method": "ProcessRequest"})
+
+        try:
+            # Tracing: extract context and create server span (manual for grpclib)
+            metadata = dict(stream.metadata)
+            ctx = propagator.extract(carrier=metadata)
+
+            with tracer.start_as_current_span(
+                "grpc.server.ProcessRequest",
+                context=ctx,
+                kind=trace.SpanKind.SERVER,
+            ) as span:
+                span.set_attribute("rpc.system", "grpc")
+                span.set_attribute("rpc.method", "ProcessRequest")
+                span.set_attribute("request.id", request.id)
+
+                # Logging: trace context now available
+                logger.info(f"Processing request: {request.id}")
+
+                # Tracing: manual span for business logic
+                with tracer.start_as_current_span("process-business-logic") as child_span:
+                    child_span.set_attribute("request.id", request.id)
+
+                    logger.info("Executing business logic")
+                    result = await self._do_business_logic(request)
+
+                    # Metrics: record success
+                    duration = time.time() - start_time
+                    request_counter.add(1, {"method": "ProcessRequest", "error": "false"})
+                    request_duration.record(duration, {"method": "ProcessRequest", "error": "false"})
+
+                    logger.info(f"Request completed in {duration:.3f}s")
+                    await stream.send_message(result)
+
+        except Exception as e:
+            # Tracing: record error
+            span = trace.get_current_span()
+            span.record_exception(e)
+            span.set_status(trace.StatusCode.ERROR, str(e))
+
+            # Metrics: record error
+            duration = time.time() - start_time
+            request_counter.add(1, {"method": "ProcessRequest", "error": "true"})
+            request_duration.record(duration, {"method": "ProcessRequest", "error": "true"})
+
+            logger.error(f"Request failed: {e}")
+            raise
+
+        finally:
+            # Metrics: always decrement active requests
+            active_requests.add(-1, {"method": "ProcessRequest"})
+```
+
+## Quick Reference: gRPC Client Call
+
+Minimal async gRPC client call with metrics, tracing, and logging:
+
+```python
+async def call_service(addr: str, port: int, request_id: str) -> MyResponse:
+    start_time = time.time()
+
+    # Logging: trace context automatically included
+    logger.info(f"Calling external service at {addr}:{port}")
+
+    # Tracing: create client span
+    with tracer.start_as_current_span(
+        "grpc.client.ProcessRequest",
+        kind=trace.SpanKind.CLIENT,
+    ) as span:
+        span.set_attribute("rpc.system", "grpc")
+        span.set_attribute("rpc.service", "MyService")
+        span.set_attribute("net.peer.name", addr)
+        span.set_attribute("net.peer.port", port)
+        span.set_attribute("request.id", request_id)
+
+        # Tracing: inject context for propagation (manual for grpclib)
+        metadata = {}
+        propagator.inject(carrier=metadata)
+
+        try:
+            async with Channel(addr, port) as channel:
+                stub = MyServiceStub(channel)
+                request = MyRequest(id=request_id)
+                result = await stub.ProcessRequest(request, metadata=list(metadata.items()))
+
+                # Metrics: record success
+                duration = time.time() - start_time
+                client_call_counter.add(1, {"service": "other-service", "error": "false"})
+                client_call_duration.record(duration, {"service": "other-service", "error": "false"})
+
+                logger.info(f"Service call completed in {duration:.3f}s")
+                return result
+
+        except Exception as e:
+            # Tracing: record error
+            span.record_exception(e)
+            span.set_status(trace.StatusCode.ERROR, str(e))
+
+            # Metrics: record error
+            duration = time.time() - start_time
+            client_call_counter.add(1, {"service": "other-service", "error": "true"})
+            client_call_duration.record(duration, {"service": "other-service", "error": "true"})
+
+            logger.error(f"Service call failed: {e}")
+            raise

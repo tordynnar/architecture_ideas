@@ -268,3 +268,102 @@ Use appropriate log levels:
 
 **OTLP Log Export:**
 Logs are exported to the OpenTelemetry Collector via OTLP/gRPC, which forwards them to Elasticsearch. The `BatchProcessor` batches logs to reduce network calls.
+
+## Quick Reference: gRPC Server
+
+Minimal gRPC server method implementation with metrics, tracing, and logging:
+
+```go
+func (s *MyServiceServer) ProcessRequest(ctx context.Context, req *pb.Request) (*pb.Response, error) {
+	startTime := time.Now()
+
+	// Metrics: track active requests
+	activeRequests.Add(ctx, 1, metric.WithAttributes(attribute.String("method", "ProcessRequest")))
+	defer activeRequests.Add(ctx, -1, metric.WithAttributes(attribute.String("method", "ProcessRequest")))
+
+	// Logging: extract trace context for correlation
+	spanCtx := trace.SpanContextFromContext(ctx)
+	logger := s.logger.With(
+		slog.String("trace_id", spanCtx.TraceID().String()),
+		slog.String("span_id", spanCtx.SpanID().String()),
+	)
+	logger.InfoContext(ctx, "Processing request", slog.String("request_id", req.Id))
+
+	// Tracing: create manual span for business logic
+	ctx, span := tracer.Start(ctx, "process-business-logic")
+	span.SetAttributes(attribute.String("request.id", req.Id))
+	defer span.End()
+
+	// Execute business logic
+	result, err := s.doBusinessLogic(ctx, req)
+
+	// Metrics: record request outcome
+	duration := time.Since(startTime).Seconds()
+	attrs := metric.WithAttributes(
+		attribute.String("method", "ProcessRequest"),
+		attribute.Bool("error", err != nil),
+	)
+	requestCounter.Add(ctx, 1, attrs)
+	requestDuration.Record(ctx, duration, attrs)
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		logger.ErrorContext(ctx, "Request failed", slog.Any("error", err))
+		return nil, err
+	}
+
+	logger.InfoContext(ctx, "Request completed", slog.Float64("duration_seconds", duration))
+	return result, nil
+}
+```
+
+## Quick Reference: gRPC Client Call
+
+Minimal gRPC client call with metrics, tracing, and logging:
+
+```go
+func (c *MyServiceClient) CallService(ctx context.Context, requestID string) (*pb.Response, error) {
+	startTime := time.Now()
+
+	// Logging: extract trace context
+	spanCtx := trace.SpanContextFromContext(ctx)
+	logger := c.logger.With(
+		slog.String("trace_id", spanCtx.TraceID().String()),
+		slog.String("span_id", spanCtx.SpanID().String()),
+	)
+	logger.InfoContext(ctx, "Calling external service", slog.String("request_id", requestID))
+
+	// Tracing: create client span (trace context auto-propagated via otelgrpc)
+	ctx, span := tracer.Start(ctx, "grpc.client.ProcessRequest",
+		trace.WithSpanKind(trace.SpanKindClient))
+	span.SetAttributes(
+		attribute.String("rpc.system", "grpc"),
+		attribute.String("rpc.service", "MyService"),
+		attribute.String("request.id", requestID),
+	)
+	defer span.End()
+
+	// Make gRPC call (trace context automatically propagated)
+	req := &pb.Request{Id: requestID}
+	result, err := c.client.ProcessRequest(ctx, req)
+
+	// Metrics: record call outcome
+	duration := time.Since(startTime).Seconds()
+	attrs := metric.WithAttributes(
+		attribute.String("service", "other-service"),
+		attribute.Bool("error", err != nil),
+	)
+	clientCallCounter.Add(ctx, 1, attrs)
+	clientCallDuration.Record(ctx, duration, attrs)
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+		logger.ErrorContext(ctx, "Service call failed", slog.Any("error", err))
+		return nil, err
+	}
+
+	logger.InfoContext(ctx, "Service call completed", slog.Float64("duration_seconds", duration))
+	return result, nil
+}

@@ -437,3 +437,125 @@ public MyServiceImpl(ILogger<MyServiceImpl> logger)
 4. **Add meaningful tags**: Include request IDs, user IDs, operation types
 5. **Record exceptions**: Always call `RecordException()` in catch blocks
 6. **Use appropriate log levels**: Debug for development, Info/Error for production
+
+## Quick Reference: gRPC Server
+
+Minimal gRPC server method implementation with metrics, tracing, and logging:
+
+```csharp
+public override async Task<MyResponse> ProcessRequest(MyRequest request, ServerCallContext context)
+{
+    var stopwatch = Stopwatch.StartNew();
+
+    // Metrics: track active requests
+    ActiveRequests.Add(1, new KeyValuePair<string, object?>("method", "ProcessRequest"));
+
+    try
+    {
+        // Logging: trace context automatically included by OpenTelemetry
+        _logger.LogInformation("Processing request {RequestId}", request.Id);
+
+        // Tracing: manual span for business logic
+        using var activity = ActivitySource.StartActivity("process-business-logic");
+        activity?.SetTag("request.id", request.Id);
+
+        _logger.LogInformation("Executing business logic");
+        var result = await DoBusinessLogicAsync(request);
+
+        // Metrics: record success
+        stopwatch.Stop();
+        var duration = stopwatch.Elapsed.TotalSeconds;
+        RequestCounter.Add(1,
+            new KeyValuePair<string, object?>("method", "ProcessRequest"),
+            new KeyValuePair<string, object?>("error", false));
+        RequestDuration.Record(duration,
+            new KeyValuePair<string, object?>("method", "ProcessRequest"),
+            new KeyValuePair<string, object?>("error", false));
+
+        _logger.LogInformation("Request completed in {Duration:F3}s", duration);
+        return result;
+    }
+    catch (Exception ex)
+    {
+        // Tracing: record error
+        Activity.Current?.SetStatus(ActivityStatusCode.Error, ex.Message);
+        Activity.Current?.RecordException(ex);
+
+        // Metrics: record error
+        stopwatch.Stop();
+        var duration = stopwatch.Elapsed.TotalSeconds;
+        RequestCounter.Add(1,
+            new KeyValuePair<string, object?>("method", "ProcessRequest"),
+            new KeyValuePair<string, object?>("error", true));
+        RequestDuration.Record(duration,
+            new KeyValuePair<string, object?>("method", "ProcessRequest"),
+            new KeyValuePair<string, object?>("error", true));
+
+        _logger.LogError(ex, "Request failed for {RequestId}", request.Id);
+        throw new RpcException(new Status(StatusCode.Internal, ex.Message));
+    }
+    finally
+    {
+        // Metrics: always decrement active requests
+        ActiveRequests.Add(-1, new KeyValuePair<string, object?>("method", "ProcessRequest"));
+    }
+}
+```
+
+## Quick Reference: gRPC Client Call
+
+Minimal gRPC client call with metrics, tracing, and logging:
+
+```csharp
+public async Task<MyResponse> CallServiceAsync(string requestId)
+{
+    var stopwatch = Stopwatch.StartNew();
+
+    // Logging: trace context automatically included
+    _logger.LogInformation("Calling service with request {RequestId}", requestId);
+
+    // Tracing: create client span
+    using var activity = ActivitySource.StartActivity("grpc.client.ProcessRequest", ActivityKind.Client);
+    activity?.SetTag("rpc.system", "grpc");
+    activity?.SetTag("rpc.service", "MyService");
+    activity?.SetTag("request.id", requestId);
+
+    try
+    {
+        // Make gRPC call (trace context auto-propagated via GrpcClientInstrumentation)
+        var request = new MyRequest { Id = requestId };
+        var result = await _client.ProcessRequestAsync(request);
+
+        // Metrics: record success
+        stopwatch.Stop();
+        var duration = stopwatch.Elapsed.TotalSeconds;
+        ClientCallCounter.Add(1,
+            new KeyValuePair<string, object?>("service", "other-service"),
+            new KeyValuePair<string, object?>("error", false));
+        ClientCallDuration.Record(duration,
+            new KeyValuePair<string, object?>("service", "other-service"),
+            new KeyValuePair<string, object?>("error", false));
+
+        _logger.LogInformation("Service call completed in {Duration:F3}s", duration);
+        return result;
+    }
+    catch (RpcException ex)
+    {
+        // Tracing: record error
+        activity?.SetStatus(ActivityStatusCode.Error, ex.Message);
+        activity?.RecordException(ex);
+
+        // Metrics: record error
+        stopwatch.Stop();
+        var duration = stopwatch.Elapsed.TotalSeconds;
+        ClientCallCounter.Add(1,
+            new KeyValuePair<string, object?>("service", "other-service"),
+            new KeyValuePair<string, object?>("error", true));
+        ClientCallDuration.Record(duration,
+            new KeyValuePair<string, object?>("service", "other-service"),
+            new KeyValuePair<string, object?>("error", true));
+
+        _logger.LogError(ex, "Service call failed");
+        throw;
+    }
+}

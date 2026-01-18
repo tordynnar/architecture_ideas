@@ -317,3 +317,108 @@ The `tracing_subscriber::fmt::layer().json()` formats logs as JSON for easy pars
 
 **OpenTelemetry Integration:**
 The `tracing-opentelemetry` layer exports trace data to the OpenTelemetry Collector. Logs are correlated with traces via the span context, which is automatically included in each log event.
+
+## Quick Reference: gRPC Server
+
+Minimal gRPC server method implementation with metrics, tracing, and logging:
+
+```rust
+#[tonic::async_trait]
+impl MyService for MyServiceImpl {
+    #[instrument(skip(self, request), fields(request_id = %request.get_ref().id))]
+    async fn process_request(
+        &self,
+        request: Request<MyRequest>,
+    ) -> Result<Response<MyResponse>, Status> {
+        let start_time = Instant::now();
+
+        // Metrics: track active requests
+        self.metrics.active_requests.add(1, &[KeyValue::new("method", "ProcessRequest")]);
+
+        let req = request.into_inner();
+
+        // Logging: automatically includes trace_id/span_id via tracing
+        info!(request_id = %req.id, "Processing request");
+
+        // Tracing: manual span for business logic
+        let result = {
+            let span = info_span!("process-business-logic", request.id = %req.id);
+            let _guard = span.enter();
+
+            info!("Executing business logic");
+            self.do_business_logic(&req).await
+        };
+
+        // Metrics: record request outcome
+        let duration = start_time.elapsed().as_secs_f64();
+        let is_error = result.is_err();
+        let attrs = [
+            KeyValue::new("method", "ProcessRequest"),
+            KeyValue::new("error", is_error),
+        ];
+        self.metrics.request_counter.add(1, &attrs);
+        self.metrics.request_duration.record(duration, &attrs);
+        self.metrics.active_requests.add(-1, &[KeyValue::new("method", "ProcessRequest")]);
+
+        match result {
+            Ok(response) => {
+                info!(duration_seconds = duration, "Request completed");
+                Ok(Response::new(response))
+            }
+            Err(e) => {
+                error!(error = %e, duration_seconds = duration, "Request failed");
+                Err(Status::internal(e.to_string()))
+            }
+        }
+    }
+}
+```
+
+## Quick Reference: gRPC Client Call
+
+Minimal gRPC client call with metrics, tracing, and logging:
+
+```rust
+impl MyServiceClient {
+    #[instrument(skip(self))]
+    pub async fn call_service(&self, request_id: &str) -> Result<MyResponse, Box<dyn std::error::Error>> {
+        let start_time = Instant::now();
+
+        // Logging: automatically includes trace context
+        info!(request_id = %request_id, "Calling external service");
+
+        // Tracing: create client span
+        let span = info_span!(
+            "grpc.client.ProcessRequest",
+            rpc.system = "grpc",
+            rpc.service = "MyService",
+            request.id = %request_id,
+        );
+        let _guard = span.enter();
+
+        // Make gRPC call (trace context propagated via tonic interceptor)
+        let request = MyRequest { id: request_id.to_string() };
+        let result = self.client.clone().process_request(request).await;
+
+        // Metrics: record call outcome
+        let duration = start_time.elapsed().as_secs_f64();
+        let is_error = result.is_err();
+        let attrs = [
+            KeyValue::new("service", "other-service"),
+            KeyValue::new("error", is_error),
+        ];
+        self.metrics.client_call_counter.add(1, &attrs);
+        self.metrics.client_call_duration.record(duration, &attrs);
+
+        match result {
+            Ok(response) => {
+                info!(duration_seconds = duration, "Service call completed");
+                Ok(response.into_inner())
+            }
+            Err(e) => {
+                error!(error = %e, "Service call failed");
+                Err(Box::new(e))
+            }
+        }
+    }
+}

@@ -283,3 +283,99 @@ The `LoggingHandler` with `OTLPLogExporter` sends logs to the OpenTelemetry Coll
 - Include relevant context (request IDs, user IDs) in log messages
 - Use structured logging (key-value pairs) rather than string interpolation where possible
 - Log errors with sufficient context to debug without accessing the trace
+
+## Quick Reference: gRPC Server
+
+Minimal gRPC server method implementation with metrics, tracing, and logging:
+
+```python
+class MyServiceServicer(myservice_pb2_grpc.MyServiceServicer):
+    def ProcessRequest(self, request, context):
+        start_time = time.time()
+
+        # Metrics: track active requests
+        active_requests.add(1, {"method": "ProcessRequest"})
+
+        try:
+            # Logging: trace context automatically included via TraceContextFilter
+            logger.info(f"Processing request: {request.id}")
+
+            # Tracing: manual span for business logic
+            with tracer.start_as_current_span("process-business-logic") as span:
+                span.set_attribute("request.id", request.id)
+
+                logger.info("Executing business logic")
+                result = self._do_business_logic(request)
+
+                # Metrics: record success
+                duration = time.time() - start_time
+                request_counter.add(1, {"method": "ProcessRequest", "error": "false"})
+                request_duration.record(duration, {"method": "ProcessRequest", "error": "false"})
+
+                logger.info(f"Request completed in {duration:.3f}s")
+                return result
+
+        except Exception as e:
+            # Tracing: record error
+            span = trace.get_current_span()
+            span.record_exception(e)
+            span.set_status(trace.StatusCode.ERROR, str(e))
+
+            # Metrics: record error
+            duration = time.time() - start_time
+            request_counter.add(1, {"method": "ProcessRequest", "error": "true"})
+            request_duration.record(duration, {"method": "ProcessRequest", "error": "true"})
+
+            logger.error(f"Request failed: {e}")
+            raise
+
+        finally:
+            # Metrics: always decrement active requests
+            active_requests.add(-1, {"method": "ProcessRequest"})
+```
+
+## Quick Reference: gRPC Client Call
+
+Minimal gRPC client call with metrics, tracing, and logging:
+
+```python
+def call_service(stub, request_id: str):
+    start_time = time.time()
+
+    # Logging: trace context automatically included
+    logger.info(f"Calling external service with request: {request_id}")
+
+    # Tracing: create client span
+    with tracer.start_as_current_span(
+        "grpc.client.ProcessRequest",
+        kind=trace.SpanKind.CLIENT,
+    ) as span:
+        span.set_attribute("rpc.system", "grpc")
+        span.set_attribute("rpc.service", "MyService")
+        span.set_attribute("request.id", request_id)
+
+        try:
+            # Make gRPC call (trace context auto-propagated via GrpcInstrumentorClient)
+            request = myservice_pb2.MyRequest(id=request_id)
+            result = stub.ProcessRequest(request)
+
+            # Metrics: record success
+            duration = time.time() - start_time
+            client_call_counter.add(1, {"service": "other-service", "error": "false"})
+            client_call_duration.record(duration, {"service": "other-service", "error": "false"})
+
+            logger.info(f"Service call completed in {duration:.3f}s")
+            return result
+
+        except grpc.RpcError as e:
+            # Tracing: record error
+            span.record_exception(e)
+            span.set_status(trace.StatusCode.ERROR, str(e))
+
+            # Metrics: record error
+            duration = time.time() - start_time
+            client_call_counter.add(1, {"service": "other-service", "error": "true"})
+            client_call_duration.record(duration, {"service": "other-service", "error": "true"})
+
+            logger.error(f"Service call failed: {e}")
+            raise
