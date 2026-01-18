@@ -375,6 +375,48 @@ flowchart LR
     ES --> GRAFANA
 ```
 
+#### Component Responsibilities
+
+**Services (stdout/stderr)**
+
+All microservices write structured JSON logs to stdout/stderr. This follows the 12-factor app methodology and allows the container runtime to capture logs without application-level log shipping. Each log entry must include `trace_id` and `span_id` fields for correlation with distributed traces.
+
+**Fluent Bit (DaemonSet)**
+
+Fluent Bit runs as a DaemonSet on each Kubernetes node, collecting logs from all containers. It handles:
+- Tailing container log files from `/var/log/containers/`
+- Parsing JSON-formatted log entries
+- Enriching logs with Kubernetes metadata (pod name, namespace, labels)
+- Buffering and retrying failed deliveries
+- Forwarding logs to the OpenTelemetry Collector
+
+Fluent Bit is chosen over Fluentd for its lower resource footprint (~450KB memory vs ~40MB).
+
+**OpenTelemetry Collector (logs pipeline)**
+
+The OTel Collector receives logs from Fluent Bit and applies processing before export:
+- **Batching**: Groups log entries to reduce network overhead
+- **Filtering**: Drops debug logs in production, removes sensitive fields
+- **Transformation**: Normalizes field names across different service languages
+- **Sampling**: Reduces volume for high-traffic services while preserving error logs
+- **Resource attribution**: Adds service.name, service.version, and deployment.environment
+
+**Elasticsearch**
+
+Elasticsearch stores logs with full-text indexing for powerful search capabilities:
+- Index pattern: `logs-otel-YYYY.MM.DD` for time-based partitioning
+- Retention: Configurable ILM (Index Lifecycle Management) policies
+- Shared cluster with Jaeger trace indices for infrastructure efficiency
+- Supports both structured queries and free-text search across log messages
+
+**Grafana (Lucene/KQL)**
+
+Grafana provides the query interface for logs via its Elasticsearch data source:
+- **Explore view**: Ad-hoc log search and filtering
+- **Log panels**: Embedded log streams in dashboards
+- **Trace correlation**: Click a trace_id to jump to the corresponding trace in Jaeger
+- **Alerting**: Trigger alerts based on log patterns (error spikes, specific messages)
+
 ---
 
 ## Language-Specific Implementations
