@@ -1,6 +1,8 @@
 use std::env;
 use std::time::{Duration, Instant};
 
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::{runtime, trace as sdktrace, Resource};
 use rand::Rng;
 use tonic::{transport::Server, Request, Response, Status};
 use tracing::{info, instrument, warn};
@@ -192,10 +194,37 @@ fn chrono_timestamp_ms() -> i64 {
 }
 
 fn init_tracing() {
+    let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .unwrap_or_else(|_| "http://localhost:4317".into());
+    let service_name = env::var("OTEL_SERVICE_NAME")
+        .unwrap_or_else(|_| "service-b".into());
+
+    // Set up OTLP exporter and tracer
+    let tracer = opentelemetry_otlp::new_pipeline()
+        .tracing()
+        .with_exporter(
+            opentelemetry_otlp::new_exporter()
+                .tonic()
+                .with_endpoint(&otlp_endpoint),
+        )
+        .with_trace_config(
+            sdktrace::Config::default().with_resource(Resource::new(vec![
+                opentelemetry::KeyValue::new("service.name", service_name),
+            ])),
+        )
+        .install_batch(runtime::Tokio)
+        .expect("Failed to install OpenTelemetry tracer");
+
+    // Create OpenTelemetry tracing layer
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new("info"))
         .with(tracing_subscriber::fmt::layer())
+        .with(otel_layer)
         .init();
+
+    println!("[Service B] OpenTelemetry tracing initialized, endpoint: {}", otlp_endpoint);
 }
 
 #[tokio::main]
