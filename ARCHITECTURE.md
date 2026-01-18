@@ -44,16 +44,6 @@ This document describes an architectural design for a polyglot microservices sys
 
 ```mermaid
 flowchart TB
-    subgraph "Client Layer"
-        CLI[CLI Client]
-        WEB[Web Application]
-        MOB[Mobile App]
-    end
-
-    subgraph "API Gateway"
-        GW[API Gateway<br/>Go]
-    end
-
     subgraph "Microservices Layer"
         SVC_A[Service A<br/>Go]
         SVC_B[Service B<br/>Rust]
@@ -61,48 +51,34 @@ flowchart TB
         SVC_D[Service D<br/>C]
     end
 
-    subgraph "Data Layer"
-        DB1[(PostgreSQL)]
-        DB2[(Redis)]
-        MQ[Message Queue<br/>NATS/Kafka]
-    end
-
     subgraph "Observability Stack"
         OTEL[OpenTelemetry<br/>Collector]
-        JAEGER[Jaeger]
+        JAEGER_COL[Jaeger Collector]
+        JAEGER_Q[Jaeger Query/UI]
         PROM[Prometheus]
-        LOKI[Loki]
+        ES[(Elasticsearch<br/>Traces + Logs)]
         GRAFANA[Grafana]
     end
 
-    CLI --> GW
-    WEB --> GW
-    MOB --> GW
-
-    GW -->|gRPC| SVC_A
-    GW -->|gRPC| SVC_B
+    SVC_A -->|gRPC| SVC_B
     SVC_A -->|gRPC| SVC_C
     SVC_B -->|gRPC| SVC_D
     SVC_C -->|gRPC| SVC_D
 
-    SVC_A --> DB1
-    SVC_B --> DB2
-    SVC_C --> MQ
-    SVC_D --> DB1
-
-    GW -.->|OTLP/gRPC| OTEL
     SVC_A -.->|OTLP/gRPC| OTEL
     SVC_B -.->|OTLP/gRPC| OTEL
     SVC_C -.->|OTLP/gRPC| OTEL
     SVC_D -.->|OTLP/gRPC| OTEL
 
-    OTEL -->|Traces| JAEGER
+    OTEL -->|Traces| JAEGER_COL
     OTEL -->|Metrics| PROM
-    OTEL -->|Logs| LOKI
+    OTEL -->|Logs| ES
+    JAEGER_COL --> ES
+    ES --> JAEGER_Q
 
-    JAEGER --> GRAFANA
-    PROM --> GRAFANA
-    LOKI --> GRAFANA
+    JAEGER_Q -->|Traces| GRAFANA
+    ES -->|Logs| GRAFANA
+    PROM -->|Metrics| GRAFANA
 
     style OTEL fill:#ff9800
     style GRAFANA fill:#4caf50
@@ -172,19 +148,18 @@ flowchart TB
         OTEL_COL[OpenTelemetry Collector]
     end
 
+    subgraph "Processing Tier"
+        JAEGER_COL[Jaeger Collector]
+        PROM_SRV[Prometheus Server]
+    end
+
     subgraph "Storage Tier"
-        subgraph "Traces"
-            JAEGER_COL[Jaeger Collector]
-            JAEGER_DB[(Jaeger Storage<br/>Elasticsearch/Cassandra)]
-        end
-        subgraph "Metrics"
-            PROM_SRV[Prometheus Server]
-            PROM_DB[(Prometheus TSDB)]
-        end
-        subgraph "Logs"
-            LOKI_SRV[Loki]
-            LOKI_DB[(Object Storage<br/>S3/GCS/MinIO)]
-        end
+        ES[(Elasticsearch<br/>Traces + Logs)]
+        PROM_DB[(Prometheus TSDB)]
+    end
+
+    subgraph "Query Tier"
+        JAEGER_Q[Jaeger Query/UI]
     end
 
     subgraph "Visualization Tier"
@@ -193,15 +168,15 @@ flowchart TB
 
     OTEL_COL -->|OTLP| JAEGER_COL
     OTEL_COL -->|Remote Write| PROM_SRV
-    OTEL_COL -->|Loki Protocol| LOKI_SRV
+    OTEL_COL -->|Logs| ES
 
-    JAEGER_COL --> JAEGER_DB
+    JAEGER_COL -->|Traces| ES
     PROM_SRV --> PROM_DB
-    LOKI_SRV --> LOKI_DB
 
-    JAEGER_DB --> GRAFANA
-    PROM_DB --> GRAFANA
-    LOKI_DB --> GRAFANA
+    ES --> JAEGER_Q
+    JAEGER_Q -->|Traces| GRAFANA
+    ES -->|Logs| GRAFANA
+    PROM_DB -->|Metrics| GRAFANA
 ```
 
 ---
@@ -385,19 +360,19 @@ flowchart LR
     end
 
     subgraph "Storage"
-        LOKI[Grafana Loki]
+        ES[Elasticsearch]
     end
 
     subgraph "Query"
-        GRAFANA[Grafana<br/>LogQL]
+        GRAFANA[Grafana<br/>Lucene/KQL]
     end
 
     S1 --> FB
     S2 --> FB
     S3 --> FB
     FB --> OTEL
-    OTEL --> LOKI
-    LOKI --> GRAFANA
+    OTEL --> ES
+    ES --> GRAFANA
 ```
 
 ---
@@ -581,8 +556,10 @@ flowchart TB
 
         subgraph "Observability Namespace"
             OTEL_DEPLOY[OTel Collector<br/>Deployment]
-            JAEGER_DEPLOY[Jaeger<br/>Deployment]
+            JAEGER_COL_DEPLOY[Jaeger Collector<br/>Deployment]
+            JAEGER_Q_DEPLOY[Jaeger Query/UI<br/>Deployment]
             PROM_DEPLOY[Prometheus<br/>StatefulSet]
+            ES_DEPLOY[Elasticsearch<br/>StatefulSet]
             GRAFANA_DEPLOY[Grafana<br/>Deployment]
         end
 
@@ -597,11 +574,16 @@ flowchart TB
     SVC_D --> SIDECAR
     SIDECAR -->|OTLP/gRPC| OTEL_DEPLOY
 
-    OTEL_DEPLOY --> JAEGER_DEPLOY
-    OTEL_DEPLOY --> PROM_DEPLOY
+    OTEL_DEPLOY -->|Traces| JAEGER_COL_DEPLOY
+    OTEL_DEPLOY -->|Metrics| PROM_DEPLOY
+    OTEL_DEPLOY -->|Logs| ES_DEPLOY
+    JAEGER_COL_DEPLOY --> ES_DEPLOY
+    ES_DEPLOY --> JAEGER_Q_DEPLOY
 
     FB_DS --> OTEL_DEPLOY
-    OTEL_DEPLOY --> GRAFANA_DEPLOY
+    JAEGER_Q_DEPLOY -->|Traces| GRAFANA_DEPLOY
+    ES_DEPLOY -->|Logs| GRAFANA_DEPLOY
+    PROM_DEPLOY -->|Metrics| GRAFANA_DEPLOY
 ```
 
 ### OpenTelemetry Collector Configuration
@@ -626,13 +608,14 @@ processors:
 
 exporters:
   jaeger:
-    endpoint: jaeger-collector:14250
+    endpoint: jaeger-collector:14250  # Jaeger stores traces in Elasticsearch
     tls:
       insecure: true
   prometheus:
     endpoint: 0.0.0.0:8889
-  loki:
-    endpoint: http://loki:3100/loki/api/v1/push
+  elasticsearch:
+    endpoints: ["http://elasticsearch:9200"]
+    logs_index: logs-otel  # Shared Elasticsearch cluster with Jaeger traces
 
 service:
   pipelines:
@@ -647,7 +630,7 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch]
-      exporters: [loki]
+      exporters: [elasticsearch]
 ```
 
 ---
