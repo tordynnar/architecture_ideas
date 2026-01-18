@@ -1,0 +1,204 @@
+services:
+  # ============================================================================
+  # Observability Stack
+  # ============================================================================
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.91.0
+    container_name: otel-collector
+    command: ["--config=/etc/otel-collector.yaml"]
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otel-collector.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus metrics
+      - "13133:13133" # Health check
+      - "55679:55679" # zpages
+    depends_on:
+      - jaeger
+    networks:
+      - grpcarch
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.53
+    container_name: jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # Jaeger UI
+      - "14268:14268" # Jaeger HTTP collector
+      - "14250:14250" # Jaeger gRPC
+    networks:
+      - grpcarch
+
+  prometheus:
+    image: prom/prometheus:v2.48.1
+    container_name: prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+    networks:
+      - grpcarch
+
+  grafana:
+    image: grafana/grafana:10.2.3
+    container_name: grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - jaeger
+    networks:
+      - grpcarch
+
+  # ============================================================================
+  # Microservices
+  # ============================================================================
+
+  # Service A (Go) - Entry Point
+  service-a:
+    build:
+      context: .
+      dockerfile: services/service-a/Dockerfile
+    container_name: service-a
+    environment:
+      - SERVICE_NAME=service-a
+      - GRPC_PORT=50051
+      - SERVICE_B_ADDR=service-b:50052
+      - SERVICE_C_ADDR=service-c:50053
+      - OTEL_EXPORTER_OTLP_ENDPOINT=otel-collector:4317
+      - OTEL_SERVICE_NAME=service-a
+    ports:
+      - "50051:50051"
+    depends_on:
+      - otel-collector
+      - service-b
+      - service-c
+    networks:
+      - grpcarch
+
+  # Service B (Rust) - Data Processor
+  service-b:
+    build:
+      context: .
+      dockerfile: services/service-b/Dockerfile
+    container_name: service-b
+    environment:
+      - SERVICE_NAME=service-b
+      - GRPC_PORT=50052
+      - SERVICE_D_ADDR=service-d:50054
+      - SERVICE_E_ADDR=service-e:50055
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=service-b
+    ports:
+      - "50052:50052"
+    depends_on:
+      - otel-collector
+      - service-d
+      - service-e
+    networks:
+      - grpcarch
+
+  # Service C (Python) - Analytics
+  service-c:
+    build:
+      context: .
+      dockerfile: services/service-c/Dockerfile
+    container_name: service-c
+    environment:
+      - SERVICE_NAME=service-c
+      - GRPC_PORT=50053
+      - SERVICE_D_ADDR=service-d:50054
+      - SERVICE_F_ADDR=service-f:50056
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=service-c
+    ports:
+      - "50053:50053"
+    depends_on:
+      - otel-collector
+      - service-d
+      - service-f
+    networks:
+      - grpcarch
+
+  # Service D (C#) - Validation (~20% error rate)
+  service-d:
+    build:
+      context: .
+      dockerfile: services/service-d/Dockerfile
+    container_name: service-d
+    environment:
+      - SERVICE_NAME=service-d
+      - GRPC_PORT=50054
+      - ERROR_RATE=0.20
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=service-d
+    ports:
+      - "50054:50054"
+    depends_on:
+      - otel-collector
+    networks:
+      - grpcarch
+
+  # Service E (C++) - Computation
+  service-e:
+    build:
+      context: .
+      dockerfile: services/service-e/Dockerfile
+    container_name: service-e
+    environment:
+      - SERVICE_NAME=service-e
+      - GRPC_PORT=50055
+      - SERVICE_D_ADDR=service-d:50054
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=service-e
+    ports:
+      - "50055:50055"
+    depends_on:
+      - otel-collector
+      - service-d
+    networks:
+      - grpcarch
+
+  # Service F (C) - Legacy Data
+  service-f:
+    build:
+      context: .
+      dockerfile: services/service-f/Dockerfile
+    container_name: service-f
+    environment:
+      - SERVICE_NAME=service-f
+      - GRPC_PORT=50056
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
+      - OTEL_SERVICE_NAME=service-f
+    ports:
+      - "50056:50056"
+    depends_on:
+      - otel-collector
+    networks:
+      - grpcarch
+
+networks:
+  grpcarch:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  grafana-data:

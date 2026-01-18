@@ -1,0 +1,19 @@
+[package]
+name = "service-b"
+version = "1.0.0"
+edition = "2021"
+
+[[bin]]
+name = "service-b"
+path = "src/main.rs"
+
+[dependencies]
+tonic = "0.12"
+prost = "0.13"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rand = "0.8"
+
+[build-dependencies]
+tonic-build = "0.12"

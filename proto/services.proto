@@ -1,0 +1,201 @@
+syntax = "proto3";
+
+package grpcarch;
+
+option go_package = "github.com/grpcarchitecture/proto";
+option csharp_namespace = "GrpcArchitecture.Proto";
+
+import "common.proto";
+
+// ============================================================================
+// Service A (Go) - Entry Point
+// Port: 50051
+// Calls: B, C (parallel)
+// ============================================================================
+
+service ServiceA {
+  // Trigger the workload - starts 50-iteration loop
+  rpc TriggerWorkload(WorkloadRequest) returns (WorkloadResponse);
+
+  // Health check
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message WorkloadRequest {
+  RequestMetadata metadata = 1;
+  int32 iterations = 2;  // Number of iterations (default 50)
+}
+
+message WorkloadResponse {
+  ResponseStatus status = 1;
+  int32 successful_iterations = 2;
+  int32 failed_iterations = 3;
+  repeated IterationResult results = 4;
+}
+
+message IterationResult {
+  int32 iteration = 1;
+  bool success = 2;
+  string error_message = 3;
+  int64 duration_ms = 4;
+}
+
+// ============================================================================
+// Service B (Rust) - Data Processor
+// Port: 50052
+// Calls: E, then D (sequential)
+// ============================================================================
+
+service ServiceB {
+  // Process data through the pipeline
+  rpc ProcessData(ProcessRequest) returns (ProcessResponse);
+}
+
+message ProcessRequest {
+  RequestMetadata metadata = 1;
+  DataPayload payload = 2;
+}
+
+message ProcessResponse {
+  ResponseStatus status = 1;
+  DataPayload result = 2;
+  ProcessingMetrics metrics = 3;
+}
+
+message ProcessingMetrics {
+  int64 processing_time_ms = 1;
+  int32 items_processed = 2;
+  string processor_id = 3;
+}
+
+// ============================================================================
+// Service C (Python) - Analytics
+// Port: 50053
+// Calls: D, F (parallel)
+// ============================================================================
+
+service ServiceC {
+  // Run analytics/ML inference
+  rpc RunAnalytics(AnalyticsRequest) returns (AnalyticsResponse);
+}
+
+message AnalyticsRequest {
+  RequestMetadata metadata = 1;
+  DataPayload input_data = 2;
+  string model_name = 3;
+}
+
+message AnalyticsResponse {
+  ResponseStatus status = 1;
+  AnalyticsResult result = 2;
+}
+
+message AnalyticsResult {
+  double confidence_score = 1;
+  string prediction = 2;
+  map<string, double> feature_importance = 3;
+  int64 inference_time_ms = 4;
+}
+
+// ============================================================================
+// Service D (C#) - Validation (~20% error rate)
+// Port: 50054
+// Calls: None (leaf)
+// ============================================================================
+
+service ServiceD {
+  // Validate data - has ~20% simulated error rate
+  rpc ValidateData(ValidationRequest) returns (ValidationResponse);
+}
+
+message ValidationRequest {
+  RequestMetadata metadata = 1;
+  DataPayload data = 2;
+  repeated string validation_rules = 3;
+}
+
+message ValidationResponse {
+  ResponseStatus status = 1;
+  bool is_valid = 2;
+  repeated ValidationError errors = 3;
+}
+
+message ValidationError {
+  string field = 1;
+  string rule = 2;
+  string message = 3;
+}
+
+// ============================================================================
+// Service E (C++) - Computation
+// Port: 50055
+// Calls: D
+// ============================================================================
+
+service ServiceE {
+  // Perform computation
+  rpc Compute(ComputeRequest) returns (ComputeResponse);
+}
+
+message ComputeRequest {
+  RequestMetadata metadata = 1;
+  repeated double input_values = 2;
+  string operation = 3;  // e.g., "sum", "average", "transform"
+}
+
+message ComputeResponse {
+  ResponseStatus status = 1;
+  repeated double output_values = 2;
+  ComputeMetrics metrics = 3;
+}
+
+message ComputeMetrics {
+  int64 compute_time_ms = 1;
+  int32 operations_performed = 2;
+  double memory_used_mb = 3;
+}
+
+// ============================================================================
+// Service F (C) - Legacy Data (leaf)
+// Port: 50056
+// Calls: None (leaf)
+// ============================================================================
+
+service ServiceF {
+  // Fetch legacy data
+  rpc FetchLegacyData(LegacyDataRequest) returns (LegacyDataResponse);
+}
+
+message LegacyDataRequest {
+  RequestMetadata metadata = 1;
+  string record_id = 2;
+  string table_name = 3;
+}
+
+message LegacyDataResponse {
+  ResponseStatus status = 1;
+  LegacyRecord record = 2;
+}
+
+message LegacyRecord {
+  string id = 1;
+  bytes raw_data = 2;
+  int64 created_at = 3;
+  int64 updated_at = 4;
+  map<string, string> fields = 5;
+}
+
+// ============================================================================
+// Common Health Check (used by all services)
+// ============================================================================
+
+message HealthCheckRequest {
+  string service_name = 1;
+}
+
+message HealthCheckResponse {
+  bool healthy = 1;
+  string service_name = 2;
+  string version = 3;
+  int64 uptime_seconds = 4;
+}
