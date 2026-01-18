@@ -423,6 +423,7 @@ Each language implementation includes complete code samples demonstrating:
 | Python (Sync) | [implementations/python-sync.md](implementations/python-sync.md) | `opentelemetry-instrumentation-grpc`, `grpcio` |
 | Python (Async) | [implementations/python-async.md](implementations/python-async.md) | `opentelemetry-api`, `grpclib` |
 | C | [implementations/c.md](implementations/c.md) | `libcurl`, `jansson`, `grpc-c` |
+| C++ | [implementations/cpp.md](implementations/cpp.md) | `opentelemetry-cpp`, `grpc++` |
 | C# | [implementations/csharp.md](implementations/csharp.md) | `OpenTelemetry`, `Grpc.AspNetCore` |
 
 ---
