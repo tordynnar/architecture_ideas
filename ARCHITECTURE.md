@@ -360,7 +360,7 @@ flowchart LR
     end
 
     subgraph "Query"
-        GRAFANA[Grafana<br/>Lucene/KQL]
+        GRAFANA[Grafana<br/>Lucene]
     end
 
     S1 -->|OTLP| OTEL
@@ -398,7 +398,7 @@ Elasticsearch stores logs with full-text indexing for powerful search capabiliti
 - Shared cluster with Jaeger trace indices for infrastructure efficiency
 - Supports both structured queries and free-text search across log messages
 
-**Grafana (Lucene/KQL)**
+**Grafana (Lucene)**
 
 Grafana provides the query interface for logs via its Elasticsearch data source:
 - **Explore view**: Ad-hoc log search and filtering
