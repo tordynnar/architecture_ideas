@@ -425,6 +425,7 @@ Each language implementation includes complete code samples demonstrating:
 | C | [implementations/c.md](implementations/c.md) | `libcurl`, `jansson`, `grpc-c` |
 | C++ | [implementations/cpp.md](implementations/cpp.md) | `opentelemetry-cpp`, `grpc++` |
 | C# | [implementations/csharp.md](implementations/csharp.md) | `OpenTelemetry`, `Grpc.AspNetCore` |
+| Zig | [implementations/zig.md](implementations/zig.md) | `std.http`, `std.atomic` (no external deps) |
 
 ---
 
