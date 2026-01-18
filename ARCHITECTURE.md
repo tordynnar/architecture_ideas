@@ -242,7 +242,7 @@ All services must include these standard attributes:
 |-----------|-------------|---------|
 | `service.name` | Service identifier | `user-service` |
 | `service.version` | Deployment version | `1.2.3` |
-| `service.instance.id` | Instance identifier | `pod-abc123` |
+| `service.instance.id` | Instance identifier | `container-abc123` |
 | `rpc.system` | RPC system | `grpc` |
 | `rpc.service` | gRPC service name | `UserService` |
 | `rpc.method` | gRPC method | `GetUser` |
@@ -346,16 +346,12 @@ All logs must include trace context for correlation:
 ```mermaid
 flowchart LR
     subgraph "Services"
-        S1[Service A<br/>stdout/stderr]
-        S2[Service B<br/>stdout/stderr]
-        S3[Service C<br/>stdout/stderr]
+        S1[Service A]
+        S2[Service B]
+        S3[Service C]
     end
 
-    subgraph "Collection"
-        FB[Fluent Bit<br/>DaemonSet]
-    end
-
-    subgraph "Aggregation"
+    subgraph "Collection & Processing"
         OTEL[OTel Collector<br/>logs pipeline]
     end
 
@@ -367,39 +363,32 @@ flowchart LR
         GRAFANA[Grafana<br/>Lucene/KQL]
     end
 
-    S1 --> FB
-    S2 --> FB
-    S3 --> FB
-    FB --> OTEL
+    S1 -->|OTLP| OTEL
+    S2 -->|OTLP| OTEL
+    S3 -->|OTLP| OTEL
     OTEL --> ES
     ES --> GRAFANA
 ```
 
 #### Component Responsibilities
 
-**Services (stdout/stderr)**
+**Services**
 
-All microservices write structured JSON logs to stdout/stderr. This follows the 12-factor app methodology and allows the container runtime to capture logs without application-level log shipping. Each log entry must include `trace_id` and `span_id` fields for correlation with distributed traces.
+All microservices use the OpenTelemetry SDK to send logs directly to the OTel Collector via OTLP. The SDK automatically:
+- Attaches `trace_id` and `span_id` to log entries for trace correlation
+- Includes resource attributes (service.name, service.version)
+- Batches and exports logs asynchronously to minimize performance impact
 
-**Fluent Bit (DaemonSet)**
-
-Fluent Bit runs as a DaemonSet on each Kubernetes node, collecting logs from all containers. It handles:
-- Tailing container log files from `/var/log/containers/`
-- Parsing JSON-formatted log entries
-- Enriching logs with Kubernetes metadata (pod name, namespace, labels)
-- Buffering and retrying failed deliveries
-- Forwarding logs to the OpenTelemetry Collector
-
-Fluent Bit is chosen over Fluentd for its lower resource footprint (~450KB memory vs ~40MB).
+Services also write to stdout/stderr for local debugging via `docker logs`.
 
 **OpenTelemetry Collector (logs pipeline)**
 
-The OTel Collector receives logs from Fluent Bit and applies processing before export:
+The OTel Collector receives logs from services via OTLP and applies processing before export:
 - **Batching**: Groups log entries to reduce network overhead
 - **Filtering**: Drops debug logs in production, removes sensitive fields
 - **Transformation**: Normalizes field names across different service languages
 - **Sampling**: Reduces volume for high-traffic services while preserving error logs
-- **Resource attribution**: Adds service.name, service.version, and deployment.environment
+- **Resource attribution**: Enriches logs with deployment.environment and container metadata
 
 **Elasticsearch**
 
@@ -556,77 +545,59 @@ flowchart TB
 **Options:**
 1. **OpenTelemetry C++ SDK** with C bindings
 2. **Lightweight HTTP client** posting OTLP/JSON directly
-3. **Sidecar pattern** using OpenTelemetry Collector
 
-**Recommended: Sidecar Pattern for C Services**
+**Recommended: Direct OTLP Export**
 
 ```mermaid
 flowchart LR
-    subgraph "Pod"
-        C_SVC[C Service]
-        OTEL_AGENT[OTel Collector<br/>Sidecar]
-    end
-
-    C_SVC -->|stdout + trace headers| OTEL_AGENT
-    OTEL_AGENT -->|OTLP/gRPC| CENTRAL[Central Collector]
+    C_SVC[C Service] -->|OTLP/gRPC| OTEL[OTel Collector]
 ```
+
+For C services, use a lightweight HTTP client to post telemetry as OTLP/JSON to the central OpenTelemetry Collector. This avoids the complexity of linking the C++ SDK while maintaining full observability.
 
 ---
 
 ## Deployment Architecture
 
-### Kubernetes Deployment
+### Docker Compose Deployment
 
 ```mermaid
 flowchart TB
-    subgraph "Kubernetes Cluster"
-        subgraph "Application Namespace"
-            subgraph "Pod: Service A"
-                SVC_A[Go Service]
-            end
-            subgraph "Pod: Service B"
-                SVC_B[Rust Service]
-            end
-            subgraph "Pod: Service C"
-                SVC_C[Python Service]
-            end
-            subgraph "Pod: Service D"
-                SVC_D[C Service]
-                SIDECAR[OTel Sidecar]
-            end
+    subgraph "Docker Host"
+        subgraph "Application Services"
+            SVC_A[service-a<br/>Go]
+            SVC_B[service-b<br/>Rust]
+            SVC_C[service-c<br/>Python]
+            SVC_D[service-d<br/>C]
         end
 
-        subgraph "Observability Namespace"
-            OTEL_DEPLOY[OTel Collector<br/>Deployment]
-            JAEGER_COL_DEPLOY[Jaeger Collector<br/>Deployment]
-            JAEGER_Q_DEPLOY[Jaeger Query/UI<br/>Deployment]
-            PROM_DEPLOY[Prometheus<br/>StatefulSet]
-            ES_DEPLOY[Elasticsearch<br/>StatefulSet]
-            GRAFANA_DEPLOY[Grafana<br/>Deployment]
-        end
-
-        subgraph "DaemonSets"
-            FB_DS[Fluent Bit<br/>DaemonSet]
+        subgraph "Observability Stack"
+            OTEL[otel-collector]
+            JAEGER_COL[jaeger-collector]
+            JAEGER_Q[jaeger-query]
+            PROM[prometheus]
+            ES[elasticsearch]
+            GRAFANA[grafana]
         end
     end
 
-    SVC_A -->|OTLP/gRPC| OTEL_DEPLOY
-    SVC_B -->|OTLP/gRPC| OTEL_DEPLOY
-    SVC_C -->|OTLP/gRPC| OTEL_DEPLOY
-    SVC_D --> SIDECAR
-    SIDECAR -->|OTLP/gRPC| OTEL_DEPLOY
+    SVC_A -->|OTLP/gRPC| OTEL
+    SVC_B -->|OTLP/gRPC| OTEL
+    SVC_C -->|OTLP/gRPC| OTEL
+    SVC_D -->|OTLP/gRPC| OTEL
 
-    OTEL_DEPLOY -->|Traces| JAEGER_COL_DEPLOY
-    OTEL_DEPLOY -->|Metrics| PROM_DEPLOY
-    OTEL_DEPLOY -->|Logs| ES_DEPLOY
-    JAEGER_COL_DEPLOY --> ES_DEPLOY
-    ES_DEPLOY --> JAEGER_Q_DEPLOY
+    OTEL -->|Traces| JAEGER_COL
+    OTEL -->|Metrics| PROM
+    OTEL -->|Logs| ES
+    JAEGER_COL --> ES
+    ES --> JAEGER_Q
 
-    FB_DS --> OTEL_DEPLOY
-    JAEGER_Q_DEPLOY -->|Traces| GRAFANA_DEPLOY
-    ES_DEPLOY -->|Logs| GRAFANA_DEPLOY
-    PROM_DEPLOY -->|Metrics| GRAFANA_DEPLOY
+    JAEGER_Q -->|Traces| GRAFANA
+    ES -->|Logs| GRAFANA
+    PROM -->|Metrics| GRAFANA
 ```
+
+All services run as containers on a single Docker host, communicating over a shared Docker network. Services send telemetry directly to the OpenTelemetry Collector via OTLP/gRPC—no sidecar or agent containers are required.
 
 ### OpenTelemetry Collector Configuration
 
@@ -679,16 +650,11 @@ service:
 
 ## Alternative Designs Considered
 
-### Alternative 1: Jaeger Agent Sidecar Pattern
+### Alternative 1: Jaeger Agent Pattern
 
 ```mermaid
 flowchart LR
-    subgraph "Pod"
-        SVC[Microservice]
-        AGENT[Jaeger Agent]
-    end
-
-    SVC -->|UDP 6831| AGENT
+    SVC[Microservice] -->|UDP 6831| AGENT[Jaeger Agent]
     AGENT -->|Thrift/HTTP| COLLECTOR[Jaeger Collector]
 ```
 
@@ -699,7 +665,7 @@ flowchart LR
 **Cons:**
 - Jaeger-specific, not vendor-neutral
 - UDP can lose traces under load
-- Additional sidecar per pod
+- Additional container to manage
 
 **Decision:** Rejected in favor of OpenTelemetry for vendor neutrality and future flexibility.
 
@@ -841,7 +807,7 @@ flowchart TB
 - [ ] **PII Filtering**: Sanitize sensitive data before export
 - [ ] **Access Control**: RBAC for Grafana dashboards
 - [ ] **Data Retention**: Configure retention policies
-- [ ] **Network Segmentation**: Observability stack in separate namespace
+- [ ] **Network Segmentation**: Observability stack on isolated Docker network
 
 ---
 
@@ -868,7 +834,7 @@ flowchart TB
 3. Validate metrics export
 
 ### Phase 5: C Services (Weeks 9-10)
-1. Deploy sidecar collectors
+1. Implement lightweight OTLP/HTTP client
 2. Implement trace header propagation
 3. Configure structured logging
 
