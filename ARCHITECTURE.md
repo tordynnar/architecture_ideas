@@ -486,38 +486,63 @@ async fn handle_request(&self, request: Request<T>) -> Result<Response<R>, Statu
 
 ### Python Implementation
 
-Python uses `opentelemetry-python` with automatic instrumentation.
+Python uses `opentelemetry-python` with automatic instrumentation. Both synchronous (`grpcio`) and asynchronous (`grpclib`) implementations are supported.
 
 ```mermaid
 flowchart TB
-    subgraph "Python Service"
-        MAIN[main.py]
-        OTEL_INIT[OpenTelemetry Setup]
-        AUTO_INST[Auto-Instrumentation]
-        GRPC_SRV[grpcio Server]
-        HANDLER[Service Handlers]
+    subgraph "Python Service (Sync)"
+        MAIN_S[main.py]
+        OTEL_S[OpenTelemetry Setup]
+        GRPC_S[grpcio Server]
+        HANDLER_S[Service Handlers]
     end
 
-    MAIN --> OTEL_INIT
-    OTEL_INIT --> AUTO_INST
-    AUTO_INST --> GRPC_SRV
-    GRPC_SRV --> HANDLER
+    subgraph "Python Service (Async)"
+        MAIN_A[main.py]
+        OTEL_A[OpenTelemetry Setup]
+        GRPC_A[grpclib Server]
+        HANDLER_A[Async Handlers]
+    end
 
-    AUTO_INST -.->|Spans| EXPORTER[OTLP gRPC Exporter]
+    MAIN_S --> OTEL_S --> GRPC_S --> HANDLER_S
+    MAIN_A --> OTEL_A --> GRPC_A --> HANDLER_A
+
+    OTEL_S -.->|Spans| EXPORTER[OTLP gRPC Exporter]
+    OTEL_A -.->|Spans| EXPORTER
 ```
 
-**Key Packages:**
+**Key Packages (Sync):**
 - `opentelemetry-api`
 - `opentelemetry-sdk`
 - `opentelemetry-exporter-otlp-proto-grpc`
 - `opentelemetry-instrumentation-grpc`
+- `grpcio`
 
-**Idiomatic Pattern:**
+**Key Packages (Async):**
+- `opentelemetry-api`
+- `opentelemetry-sdk`
+- `opentelemetry-exporter-otlp-proto-grpc`
+- `grpclib`
+
+**Idiomatic Pattern (Sync):**
 ```python
-# Automatic instrumentation
+# Automatic instrumentation for grpcio
 from opentelemetry.instrumentation.grpc import GrpcInstrumentorServer
 
 GrpcInstrumentorServer().instrument()
+```
+
+**Idiomatic Pattern (Async):**
+```python
+# Manual instrumentation for grpclib with asyncio
+from opentelemetry import trace
+
+tracer = trace.get_tracer(__name__)
+
+async def handle_request(stream):
+    with tracer.start_as_current_span("handle_request"):
+        # Async handler logic
+        pass
 ```
 
 ### C Implementation
@@ -554,6 +579,45 @@ flowchart LR
 ```
 
 For C services, use a lightweight HTTP client to post telemetry as OTLP/JSON to the central OpenTelemetry Collector. This avoids the complexity of linking the C++ SDK while maintaining full observability.
+
+### C# Implementation
+
+C# has mature OpenTelemetry support via the .NET SDK with native gRPC integration.
+
+```mermaid
+flowchart TB
+    subgraph "C# Service"
+        MAIN[Program.cs]
+        OTEL_INIT[OpenTelemetry Setup]
+        GRPC_SRV[Grpc.AspNetCore Server]
+        INTERCEPTOR[Server Interceptor]
+        HANDLER[Service Implementation]
+    end
+
+    MAIN --> OTEL_INIT
+    OTEL_INIT --> GRPC_SRV
+    GRPC_SRV --> INTERCEPTOR
+    INTERCEPTOR --> HANDLER
+
+    INTERCEPTOR -.->|Spans| EXPORTER[OTLP gRPC Exporter]
+```
+
+**Key Packages:**
+- `OpenTelemetry`
+- `OpenTelemetry.Exporter.OpenTelemetryProtocol`
+- `OpenTelemetry.Instrumentation.GrpcNetClient`
+- `OpenTelemetry.Instrumentation.AspNetCore`
+- `Grpc.AspNetCore`
+
+**Idiomatic Pattern:**
+```csharp
+// Program.cs - OpenTelemetry configuration
+builder.Services.AddOpenTelemetry()
+    .WithTracing(tracing => tracing
+        .AddAspNetCoreInstrumentation()
+        .AddGrpcClientInstrumentation()
+        .AddOtlpExporter(opts => opts.Endpoint = new Uri("http://otel-collector:4317")));
+```
 
 ---
 
@@ -778,33 +842,25 @@ flowchart LR
 flowchart TB
     subgraph "Service"
         APP[Application]
-        SANITIZE[PII Sanitizer]
         OTEL[OTel SDK]
     end
 
-    subgraph "Transport"
-        TLS[TLS 1.3 Encryption]
-    end
-
     subgraph "Collector"
-        AUTH[Authentication]
-        FILTER[Sensitive Data Filter]
-        STORE[Secure Storage]
+        STORE[Storage]
     end
 
-    APP --> SANITIZE
-    SANITIZE --> OTEL
-    OTEL --> TLS
-    TLS --> AUTH
-    AUTH --> FILTER
-    FILTER --> STORE
+    APP --> OTEL
+    OTEL --> STORE
 ```
+
+This architecture deliberately omits the following security measures, as they are not required for this use case:
+- **TLS Encryption**: Telemetry traffic is unencrypted (internal network only)
+- **Authentication**: No authentication on collector endpoints
+- **PII Sanitization**: No filtering of sensitive data in telemetry
+- **Sensitive Data Filtering**: No redaction at the collector level
 
 ### Security Checklist
 
-- [ ] **TLS Encryption**: All OTLP/gRPC traffic encrypted with TLS 1.3
-- [ ] **Authentication**: mTLS or API keys for collector endpoints
-- [ ] **PII Filtering**: Sanitize sensitive data before export
 - [ ] **Access Control**: RBAC for Grafana dashboards
 - [ ] **Data Retention**: Configure retention policies
 - [ ] **Network Segmentation**: Observability stack on isolated Docker network
@@ -813,32 +869,32 @@ flowchart TB
 
 ## Implementation Roadmap
 
-### Phase 1: Foundation (Weeks 1-2)
+### Phase 1: Foundation
 1. Deploy OpenTelemetry Collector
 2. Deploy Jaeger, Prometheus, Grafana
 3. Configure collector pipelines
 
-### Phase 2: Go Services (Weeks 3-4)
+### Phase 2: Go Services
 1. Add OpenTelemetry SDK to Go services
 2. Configure gRPC interceptors
 3. Verify trace propagation
 
-### Phase 3: Rust Services (Weeks 5-6)
+### Phase 3: Rust Services
 1. Integrate `tracing` with OpenTelemetry
 2. Configure Tonic middleware
 3. Test cross-language trace correlation
 
-### Phase 4: Python Services (Weeks 7-8)
+### Phase 4: Python Services
 1. Add auto-instrumentation
 2. Configure custom spans for ML workloads
 3. Validate metrics export
 
-### Phase 5: C Services (Weeks 9-10)
+### Phase 5: C Services
 1. Implement lightweight OTLP/HTTP client
 2. Implement trace header propagation
 3. Configure structured logging
 
-### Phase 6: Dashboards & Alerts (Weeks 11-12)
+### Phase 6: Dashboards & Alerts
 1. Create Grafana dashboards
 2. Configure alerting rules
 3. Document runbooks
