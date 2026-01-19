@@ -1,6 +1,7 @@
 using Grpc.Core;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 using OpenTelemetry;
+using OpenTelemetry.Logs;
 using OpenTelemetry.Metrics;
 using OpenTelemetry.Resources;
 using OpenTelemetry.Trace;
@@ -39,9 +40,17 @@ builder.Services.AddOpenTelemetry()
         .AddMeter(serviceName)
         .AddOtlpExporter(opts => opts.Endpoint = new Uri(otlpEndpoint)));
 
-// Configure logging
+// Configure logging with OTLP export
 builder.Logging.ClearProviders();
 builder.Logging.AddConsole();
+builder.Logging.AddOpenTelemetry(options =>
+{
+    options.SetResourceBuilder(ResourceBuilder.CreateDefault()
+        .AddService(serviceName: serviceName, serviceVersion: "1.0.0"));
+    options.IncludeFormattedMessage = true;
+    options.IncludeScopes = true;
+    options.AddOtlpExporter(otlp => otlp.Endpoint = new Uri(otlpEndpoint));
+});
 
 builder.Services.AddGrpc();
 builder.Services.AddSingleton(new ValidationService.ServiceDMetrics(serviceName));

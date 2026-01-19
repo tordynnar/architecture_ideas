@@ -4,18 +4,26 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"math/rand"
 	"net"
 	"os"
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/contrib/bridges/otelslog"
 	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
+	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetricgrpc"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/log/global"
+	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/sdk/resource"
+	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	semconv "go.opentelemetry.io/otel/semconv/v1.21.0"
 	"go.opentelemetry.io/otel/trace"
@@ -25,17 +33,25 @@ import (
 	pb "service-a/proto"
 )
 
-var tracer trace.Tracer
+var (
+	tracer          trace.Tracer
+	logger          *slog.Logger
+	meter           metric.Meter
+	requestCounter  metric.Int64Counter
+	latencyRecorder metric.Float64Histogram
+)
 
-// logWithContext logs a message with trace context
+// logWithContext logs a message with trace context using OTLP
 func logWithContext(ctx context.Context, level, msg string, args ...interface{}) {
-	span := trace.SpanFromContext(ctx)
-	spanCtx := span.SpanContext()
-	traceID := spanCtx.TraceID().String()
-	spanID := spanCtx.SpanID().String()
-
 	fullMsg := fmt.Sprintf(msg, args...)
-	log.Printf("[Service A] [trace_id=%s span_id=%s] %s: %s", traceID, spanID, level, fullMsg)
+	switch level {
+	case "ERROR":
+		logger.ErrorContext(ctx, fullMsg)
+	case "WARN":
+		logger.WarnContext(ctx, fullMsg)
+	default:
+		logger.InfoContext(ctx, fullMsg)
+	}
 }
 
 type server struct {
@@ -243,7 +259,17 @@ func (s *server) HealthCheck(ctx context.Context, req *pb.HealthCheckRequest) (*
 	}, nil
 }
 
-func initTracer(ctx context.Context) (*sdktrace.TracerProvider, error) {
+func newResource(ctx context.Context) (*resource.Resource, error) {
+	return resource.New(ctx,
+		resource.WithAttributes(
+			semconv.ServiceNameKey.String("service-a"),
+			semconv.ServiceVersionKey.String("1.0.0"),
+			attribute.String("deployment.environment", "development"),
+		),
+	)
+}
+
+func initTracer(ctx context.Context, res *resource.Resource) (*sdktrace.TracerProvider, error) {
 	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
 	if endpoint == "" {
 		endpoint = "localhost:4317"
@@ -254,17 +280,7 @@ func initTracer(ctx context.Context) (*sdktrace.TracerProvider, error) {
 		otlptracegrpc.WithInsecure(),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create OTLP exporter: %w", err)
-	}
-
-	res, err := resource.New(ctx,
-		resource.WithAttributes(
-			semconv.ServiceNameKey.String("service-a"),
-			semconv.ServiceVersionKey.String("1.0.0"),
-		),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create resource: %w", err)
+		return nil, fmt.Errorf("failed to create OTLP trace exporter: %w", err)
 	}
 
 	tp := sdktrace.NewTracerProvider(
@@ -283,17 +299,115 @@ func initTracer(ctx context.Context) (*sdktrace.TracerProvider, error) {
 	return tp, nil
 }
 
+func initLogger(ctx context.Context, res *resource.Resource) (*sdklog.LoggerProvider, error) {
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "localhost:4317"
+	}
+
+	exporter, err := otlploggrpc.New(ctx,
+		otlploggrpc.WithEndpoint(endpoint),
+		otlploggrpc.WithInsecure(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OTLP log exporter: %w", err)
+	}
+
+	lp := sdklog.NewLoggerProvider(
+		sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
+		sdklog.WithResource(res),
+	)
+
+	global.SetLoggerProvider(lp)
+
+	// Create an slog handler that bridges to OTel
+	logger = otelslog.NewLogger("service-a")
+
+	return lp, nil
+}
+
+func initMetrics(ctx context.Context, res *resource.Resource) (*sdkmetric.MeterProvider, error) {
+	endpoint := os.Getenv("OTEL_EXPORTER_OTLP_ENDPOINT")
+	if endpoint == "" {
+		endpoint = "localhost:4317"
+	}
+
+	exporter, err := otlpmetricgrpc.New(ctx,
+		otlpmetricgrpc.WithEndpoint(endpoint),
+		otlpmetricgrpc.WithInsecure(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create OTLP metric exporter: %w", err)
+	}
+
+	mp := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(10*time.Second))),
+		sdkmetric.WithResource(res),
+	)
+
+	otel.SetMeterProvider(mp)
+
+	meter = mp.Meter("service-a")
+
+	// Create metrics
+	var metricErr error
+	requestCounter, metricErr = meter.Int64Counter("service_a_requests_total",
+		metric.WithDescription("Total number of requests processed"))
+	if metricErr != nil {
+		return nil, fmt.Errorf("failed to create request counter: %w", metricErr)
+	}
+
+	latencyRecorder, metricErr = meter.Float64Histogram("service_a_request_duration_ms",
+		metric.WithDescription("Request duration in milliseconds"),
+		metric.WithUnit("ms"))
+	if metricErr != nil {
+		return nil, fmt.Errorf("failed to create latency histogram: %w", metricErr)
+	}
+
+	return mp, nil
+}
+
 func main() {
 	log.Println("[Service A] Initializing OpenTelemetry...")
 
 	ctx := context.Background()
-	tp, err := initTracer(ctx)
+
+	// Create shared resource
+	res, err := newResource(ctx)
+	if err != nil {
+		log.Fatalf("Failed to create resource: %v", err)
+	}
+
+	// Initialize tracer
+	tp, err := initTracer(ctx, res)
 	if err != nil {
 		log.Fatalf("Failed to initialize tracer: %v", err)
 	}
 	defer func() {
 		if err := tp.Shutdown(ctx); err != nil {
 			log.Printf("Error shutting down tracer provider: %v", err)
+		}
+	}()
+
+	// Initialize logger
+	lp, err := initLogger(ctx, res)
+	if err != nil {
+		log.Fatalf("Failed to initialize logger: %v", err)
+	}
+	defer func() {
+		if err := lp.Shutdown(ctx); err != nil {
+			log.Printf("Error shutting down logger provider: %v", err)
+		}
+	}()
+
+	// Initialize metrics
+	mp, err := initMetrics(ctx, res)
+	if err != nil {
+		log.Fatalf("Failed to initialize metrics: %v", err)
+	}
+	defer func() {
+		if err := mp.Shutdown(ctx); err != nil {
+			log.Printf("Error shutting down meter provider: %v", err)
 		}
 	}()
 

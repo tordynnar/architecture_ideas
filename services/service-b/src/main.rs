@@ -1,7 +1,12 @@
 use std::env;
 use std::time::{Duration, Instant};
 
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry::KeyValue;
+use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
+use opentelemetry_otlp::{LogExporter, MetricExporter, SpanExporter, WithExportConfig};
+use opentelemetry_sdk::logs::LoggerProvider;
+use opentelemetry_sdk::metrics::{PeriodicReader, SdkMeterProvider};
 use opentelemetry_sdk::{runtime, trace as sdktrace, Resource};
 use rand::Rng;
 use tonic::{transport::Server, Request, Response, Status};
@@ -193,44 +198,80 @@ fn chrono_timestamp_ms() -> i64 {
         .as_millis() as i64
 }
 
-fn init_tracing() {
+fn init_telemetry() {
     let otlp_endpoint = env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .unwrap_or_else(|_| "http://localhost:4317".into());
     let service_name = env::var("OTEL_SERVICE_NAME")
         .unwrap_or_else(|_| "service-b".into());
 
-    // Set up OTLP exporter and tracer
-    let tracer = opentelemetry_otlp::new_pipeline()
-        .tracing()
-        .with_exporter(
-            opentelemetry_otlp::new_exporter()
-                .tonic()
-                .with_endpoint(&otlp_endpoint),
-        )
-        .with_trace_config(
-            sdktrace::Config::default().with_resource(Resource::new(vec![
-                opentelemetry::KeyValue::new("service.name", service_name),
-            ])),
-        )
-        .install_batch(runtime::Tokio)
-        .expect("Failed to install OpenTelemetry tracer");
+    let resource = Resource::new(vec![
+        KeyValue::new("service.name", service_name.clone()),
+        KeyValue::new("service.version", "1.0.0"),
+        KeyValue::new("deployment.environment", "development"),
+    ]);
+
+    // Initialize tracer
+    let span_exporter = SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&otlp_endpoint)
+        .build()
+        .expect("Failed to create span exporter");
+
+    let tracer_provider = sdktrace::TracerProvider::builder()
+        .with_resource(resource.clone())
+        .with_batch_exporter(span_exporter, runtime::Tokio)
+        .build();
+
+    let tracer = tracer_provider.tracer("service-b");
+
+    // Initialize logger provider for OTLP log export
+    let log_exporter = LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(&otlp_endpoint)
+        .build()
+        .expect("Failed to create log exporter");
+
+    let logger_provider = LoggerProvider::builder()
+        .with_resource(resource.clone())
+        .with_batch_exporter(log_exporter, runtime::Tokio)
+        .build();
+
+    // Initialize metrics
+    let metric_exporter = MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(&otlp_endpoint)
+        .build()
+        .expect("Failed to create metric exporter");
+
+    let metric_reader = PeriodicReader::builder(metric_exporter, runtime::Tokio)
+        .with_interval(std::time::Duration::from_secs(10))
+        .build();
+
+    let _meter_provider = SdkMeterProvider::builder()
+        .with_resource(resource)
+        .with_reader(metric_reader)
+        .build();
 
     // Create OpenTelemetry tracing layer
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+    let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
+    // Create OpenTelemetry log bridge layer
+    let otel_log_layer = OpenTelemetryTracingBridge::new(&logger_provider);
 
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new("info"))
         .with(tracing_subscriber::fmt::layer())
-        .with(otel_layer)
+        .with(otel_trace_layer)
+        .with(otel_log_layer)
         .init();
 
-    println!("[Service B] OpenTelemetry tracing initialized, endpoint: {}", otlp_endpoint);
+    println!("[Service B] OpenTelemetry telemetry initialized, endpoint: {}", otlp_endpoint);
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("[Service B] Initializing tracing...");
-    init_tracing();
+    println!("[Service B] Initializing OpenTelemetry...");
+    init_telemetry();
 
     let port = env::var("GRPC_PORT").unwrap_or_else(|_| "50052".into());
     let service_d_addr = env::var("SERVICE_D_ADDR").unwrap_or_else(|_| "localhost:50054".into());
