@@ -1,42 +1,57 @@
 # Observability TODO
 
-## Outstanding Items
+## Completed Items
 
-### Service E (C++) - Missing All Telemetry
+### Service E (C++) - Full Telemetry ✅
 
-- **Traces**: Not exporting to Jaeger
-- **Logs**: Not exporting to Elasticsearch
-- **Metrics**: Not exporting to Prometheus
+All telemetry now working:
+- **Traces**: Exporting to Jaeger via OTLP/gRPC
+- **Logs**: Exporting to Elasticsearch via OTLP/gRPC
+- **Metrics**: Exporting to Prometheus via OTLP/gRPC
 
-**Root Cause**: The Dockerfile uses `main_simple.cpp` which has no OpenTelemetry instrumentation. The full `main.cpp` exists with OTel support but requires building the OpenTelemetry C++ SDK from source.
-
-**Fix Required**:
-1. Update Dockerfile to build OpenTelemetry C++ SDK (complex, multi-hour build)
-2. Switch from `main_simple.cpp` to `main.cpp`
-3. Link against OTel C++ libraries
+**Implementation**:
+- Multi-stage Dockerfile builds OpenTelemetry C++ SDK 1.13.0 from source
+- Uses ccache mounts for incremental builds (rebuilds take ~7 seconds)
+- Full `main.cpp` with traces, logs, and metrics instrumentation
 
 **Files**:
-- `services/service-e/Dockerfile` - needs OTel C++ SDK build steps
-- `services/service-e/main.cpp` - has OTel code, currently unused
+- `services/service-e/Dockerfile` - multi-stage build with OTel C++ SDK
+- `services/service-e/main.cpp` - full OpenTelemetry instrumentation
 
 ---
 
-### Service F (C) - Missing Logs and Metrics
+### Service F (C) - Traces and Logs ✅
 
-- **Traces**: Working (custom OTLP exporter)
-- **Logs**: Outputs to stdout in JSON format with trace context, but not OTLP
-- **Metrics**: Not implemented
+- **Traces**: Working via custom OTLP/gRPC exporter
+- **Logs**: Working via custom OTLP/gRPC exporter
+- **Metrics**: ❌ Not supported (protobuf-c incompatible with proto3 optional fields)
 
-**Root Cause**: Pure C implementation with no official OpenTelemetry C SDK for logs/metrics.
-
-**Fix Options**:
-1. Add sidecar log collector (e.g., Fluent Bit) to forward stdout logs to OTel collector
-2. Implement custom OTLP log exporter in C (similar to existing trace exporter)
-3. Rewrite in a language with better OTel support
+**Implementation**:
+- Custom OTLP log exporter using gRPC C core library
+- Background thread batches and exports logs via OTLP/gRPC
+- Metrics exporter written but excluded from build due to protobuf-c limitations
 
 **Files**:
-- `services/service-f/src/main.c` - has JSON logging with trace context
-- `services/service-f/src/otlp_exporter.c` - custom trace exporter (could extend for logs)
+- `services/service-f/src/main.c` - uses OTLP log exporter
+- `services/service-f/src/otlp_exporter.c` - trace exporter
+- `services/service-f/src/otlp_log_exporter.c` - log exporter
+- `services/service-f/src/otlp_metrics_exporter.c` - metrics exporter (not used)
+
+---
+
+## Outstanding Items
+
+### Service F Metrics
+
+**Issue**: protobuf-c does not support proto3 `optional` fields used in OpenTelemetry metrics protos.
+
+**Potential Fixes**:
+1. Wait for protobuf-c to add proto3 optional support
+2. Use an older OpenTelemetry proto version without optional fields (none exist)
+3. Fork and modify OTLP metrics proto to remove optional fields
+4. Rewrite Service F in a language with better protobuf support
+
+**Priority**: Low - Service F has traces and logs which cover most observability needs.
 
 ---
 
@@ -48,5 +63,5 @@
 | service-b | Rust | ✅ | ✅ | ✅ |
 | service-c | Python | ✅ | ✅ | ✅ |
 | service-d | C# | ✅ | ✅ | ✅ |
-| service-e | C++ | ❌ | ❌ | ❌ |
-| service-f | C | ✅ | ❌ | ❌ |
+| service-e | C++ | ✅ | ✅ | ✅ |
+| service-f | C | ✅ | ✅ | ❌ |
