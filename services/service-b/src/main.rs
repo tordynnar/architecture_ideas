@@ -1,6 +1,8 @@
 use std::env;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use opentelemetry::metrics::{Counter, Histogram, Meter};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::KeyValue;
 use opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge;
@@ -25,16 +27,61 @@ use grpcarch::{
     RequestMetadata, ResponseStatus, ValidationRequest,
 };
 
+/// Metrics for Service B
+pub struct ServiceBMetrics {
+    request_counter: Counter<u64>,
+    latency_histogram: Histogram<f64>,
+}
+
+impl ServiceBMetrics {
+    pub fn new(meter: Meter) -> Self {
+        let request_counter = meter
+            .u64_counter("service_b_requests_total")
+            .with_description("Total requests to Service B")
+            .build();
+
+        let latency_histogram = meter
+            .f64_histogram("service_b_request_duration_ms")
+            .with_description("Request duration in milliseconds")
+            .with_unit("ms")
+            .build();
+
+        Self {
+            request_counter,
+            latency_histogram,
+        }
+    }
+
+    pub fn record_request(&self, method: &str, status: &str) {
+        self.request_counter.add(
+            1,
+            &[
+                KeyValue::new("method", method.to_string()),
+                KeyValue::new("status", status.to_string()),
+            ],
+        );
+    }
+
+    pub fn record_latency(&self, method: &str, duration_ms: f64) {
+        self.latency_histogram.record(
+            duration_ms,
+            &[KeyValue::new("method", method.to_string())],
+        );
+    }
+}
+
 pub struct ServiceBImpl {
     service_d_addr: String,
     service_e_addr: String,
+    metrics: Arc<ServiceBMetrics>,
 }
 
 impl ServiceBImpl {
-    pub fn new(service_d_addr: String, service_e_addr: String) -> Self {
+    pub fn new(service_d_addr: String, service_e_addr: String, metrics: Arc<ServiceBMetrics>) -> Self {
         Self {
             service_d_addr,
             service_e_addr,
+            metrics,
         }
     }
 }
@@ -99,12 +146,18 @@ impl ServiceB for ServiceBImpl {
         if !errors.is_empty() {
             let error_msg = errors.join("; ");
             warn!("[Service B] Downstream errors: {}", error_msg);
+            self.metrics.record_request("ProcessData", "error");
+            self.metrics.record_latency("ProcessData", duration_ms as f64);
             if let Some(status) = response.status.as_mut() {
                 status.success = false;
                 status.message = format!("Partial failure: {}", error_msg);
             }
-        } else if let Some(status) = response.status.as_mut() {
-            status.message = String::from("Processing completed successfully");
+        } else {
+            self.metrics.record_request("ProcessData", "ok");
+            self.metrics.record_latency("ProcessData", duration_ms as f64);
+            if let Some(status) = response.status.as_mut() {
+                status.message = String::from("Processing completed successfully");
+            }
         }
 
         info!(
@@ -247,10 +300,13 @@ fn init_telemetry() {
         .with_interval(std::time::Duration::from_secs(10))
         .build();
 
-    let _meter_provider = SdkMeterProvider::builder()
+    let meter_provider = SdkMeterProvider::builder()
         .with_resource(resource)
         .with_reader(metric_reader)
         .build();
+
+    // Set the global meter provider to prevent it from being dropped
+    opentelemetry::global::set_meter_provider(meter_provider);
 
     // Create OpenTelemetry tracing layer
     let otel_trace_layer = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -279,7 +335,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr = format!("0.0.0.0:{}", port).parse()?;
 
-    let service = ServiceBImpl::new(service_d_addr.clone(), service_e_addr.clone());
+    // Create metrics using the global meter provider
+    let meter = opentelemetry::global::meter("service-b");
+    let metrics = Arc::new(ServiceBMetrics::new(meter));
+
+    let service = ServiceBImpl::new(service_d_addr.clone(), service_e_addr.clone(), metrics);
 
     println!("[Service B] Starting gRPC server on port {}", port);
     println!("[Service B] Data processor service (Rust) ready");
