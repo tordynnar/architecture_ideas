@@ -15,11 +15,16 @@
 #include "opentelemetry/exporters/otlp/otlp_grpc_log_record_exporter_factory.h"
 #include "opentelemetry/sdk/trace/processor.h"
 #include "opentelemetry/sdk/trace/batch_span_processor_factory.h"
+#include "opentelemetry/sdk/trace/batch_span_processor_options.h"
 #include "opentelemetry/sdk/trace/tracer_provider_factory.h"
 #include "opentelemetry/sdk/metrics/meter_provider_factory.h"
+#include "opentelemetry/sdk/metrics/meter_provider.h"
+#include "opentelemetry/sdk/metrics/meter_context_factory.h"
 #include "opentelemetry/sdk/metrics/export/periodic_exporting_metric_reader_factory.h"
 #include "opentelemetry/sdk/logs/logger_provider_factory.h"
+#include "opentelemetry/sdk/logs/processor.h"
 #include "opentelemetry/sdk/logs/batch_log_record_processor_factory.h"
+#include "opentelemetry/sdk/logs/batch_log_record_processor_options.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/metrics/provider.h"
 #include "opentelemetry/logs/provider.h"
@@ -66,10 +71,12 @@ public:
 
         auto start = std::chrono::high_resolution_clock::now();
 
+        trace_api::StartSpanOptions span_opts;
         auto span = tracer_->StartSpan("Compute",
-            {{trace_api::SemanticConventions::kRpcSystem, "grpc"},
-             {trace_api::SemanticConventions::kRpcService, "ServiceE"},
-             {trace_api::SemanticConventions::kRpcMethod, "Compute"}});
+            {{"rpc.system", "grpc"},
+             {"rpc.service", "ServiceE"},
+             {"rpc.method", "Compute"}},
+            span_opts);
         auto scope = tracer_->WithActiveSpan(span);
 
         span->SetAttribute("operation", request->operation());
@@ -138,7 +145,7 @@ public:
                     "Computation complete but validation failed: " +
                     validation_status.error_message());
             } else {
-                validation_span->SetStatus(trace_api::StatusCode::kOk);
+                validation_span->SetStatus(trace_api::StatusCode::kOk, "");
                 response->mutable_status()->set_success(true);
                 response->mutable_status()->set_message("Computation and validation successful");
             }
@@ -160,12 +167,13 @@ public:
         metrics->set_memory_used_mb(0.5);
 
         // Record telemetry
-        request_counter_->Add(1, {{"method", "Compute"}, {"status", "ok"}});
-        latency_histogram_->Record(duration_ms, {{"method", "Compute"}});
+        auto ctx = opentelemetry::context::Context{};
+        request_counter_->Add(1, {{"method", "Compute"}, {"status", "ok"}}, ctx);
+        latency_histogram_->Record(duration_ms, {{"method", "Compute"}}, ctx);
 
         span->SetAttribute("duration_ms", duration_ms);
         span->SetAttribute("output_count", static_cast<int>(results.size()));
-        span->SetStatus(trace_api::StatusCode::kOk);
+        span->SetStatus(trace_api::StatusCode::kOk, "");
         span->End();
 
         LogInfo("Computation complete (duration: " + std::to_string(duration_ms) + "ms)");
@@ -175,22 +183,22 @@ public:
 
 private:
     std::string service_d_addr_;
-    std::shared_ptr<trace_api::Tracer> tracer_;
+    opentelemetry::nostd::shared_ptr<trace_api::Tracer> tracer_;
     opentelemetry::nostd::shared_ptr<logs_api::Logger> logger_;
     std::unique_ptr<metrics_api::Counter<uint64_t>> request_counter_;
     std::unique_ptr<metrics_api::Histogram<double>> latency_histogram_;
     std::unique_ptr<grpcarch::ServiceD::Stub> service_d_stub_;
 
     void LogInfo(const std::string& message) {
-        logger_->EmitLogRecord(logs_api::Severity::kInfo, message);
+        logger_->Info(message);
     }
 
     void LogWarn(const std::string& message) {
-        logger_->EmitLogRecord(logs_api::Severity::kWarn, message);
+        logger_->Warn(message);
     }
 
     void LogError(const std::string& message) {
-        logger_->EmitLogRecord(logs_api::Severity::kError, message);
+        logger_->Error(message);
     }
 };
 
@@ -214,10 +222,12 @@ void InitTracer() {
     std::shared_ptr<trace_api::TracerProvider> provider =
         trace_sdk::TracerProviderFactory::Create(std::move(processor), resource_attrs);
 
-    trace_api::Provider::SetTracerProvider(provider);
+    trace_api::Provider::SetTracerProvider(
+        opentelemetry::nostd::shared_ptr<trace_api::TracerProvider>(provider));
 
-    opentelemetry::context::propagation::GlobalTextMapPropagator::SetGlobalPropagator(
-        std::make_shared<opentelemetry::trace::propagation::HttpTraceContext>());
+    auto propagator = opentelemetry::nostd::shared_ptr<opentelemetry::context::propagation::TextMapPropagator>(
+        new opentelemetry::trace::propagation::HttpTraceContext());
+    opentelemetry::context::propagation::GlobalTextMapPropagator::SetGlobalPropagator(propagator);
 }
 
 void InitMetrics() {
@@ -241,11 +251,14 @@ void InitMetrics() {
         {resource::SemanticConventions::kServiceVersion, "1.0.0"},
     });
 
-    auto provider = metrics_sdk::MeterProviderFactory::Create(resource_attrs);
-    auto* p = static_cast<metrics_sdk::MeterProvider*>(provider.get());
-    p->AddMetricReader(std::move(reader));
+    // Create meter context with the reader
+    auto context = metrics_sdk::MeterContextFactory::Create();
+    context->AddMetricReader(std::move(reader));
 
-    metrics_api::Provider::SetMeterProvider(std::move(provider));
+    auto provider = metrics_sdk::MeterProviderFactory::Create(std::move(context));
+
+    metrics_api::Provider::SetMeterProvider(
+        opentelemetry::nostd::shared_ptr<metrics_api::MeterProvider>(std::move(provider)));
 }
 
 void InitLogs() {
@@ -257,7 +270,8 @@ void InitLogs() {
 
     auto exporter = otlp::OtlpGrpcLogRecordExporterFactory::Create(opts);
 
-    auto processor = logs_sdk::BatchLogRecordProcessorFactory::Create(std::move(exporter), {});
+    logs_sdk::BatchLogRecordProcessorOptions bsp_opts;
+    auto processor = logs_sdk::BatchLogRecordProcessorFactory::Create(std::move(exporter), bsp_opts);
 
     auto resource_attrs = resource::Resource::Create({
         {resource::SemanticConventions::kServiceName, "service-e"},
@@ -266,7 +280,8 @@ void InitLogs() {
 
     auto provider = logs_sdk::LoggerProviderFactory::Create(std::move(processor), resource_attrs);
 
-    logs_api::Provider::SetLoggerProvider(std::move(provider));
+    logs_api::Provider::SetLoggerProvider(
+        opentelemetry::nostd::shared_ptr<logs_api::LoggerProvider>(std::move(provider)));
 }
 
 void RunServer() {

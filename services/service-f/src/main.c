@@ -4,7 +4,7 @@
  * This is a pure C implementation using:
  * - gRPC C core library for the gRPC server
  * - protobuf-c for protocol buffer serialization
- * - Manual OTLP trace exporter using gRPC C core
+ * - Manual OTLP exporters for traces, logs, and metrics
  */
 
 /* Enable POSIX features for strdup, usleep, etc. */
@@ -29,26 +29,55 @@
 #include "services.pb-c.h"
 #include "common.pb-c.h"
 #include "otlp_exporter.h"
+#include "otlp_log_exporter.h"
 
 /* Server state */
 static grpc_server *g_server = NULL;
 static grpc_completion_queue *g_cq = NULL;
 static int g_shutdown = 0;
-static otlp_exporter_t *g_exporter = NULL;
+static otlp_exporter_t *g_trace_exporter = NULL;
+static otlp_log_exporter_t *g_log_exporter = NULL;
 static const char *g_service_name = "service-f";
 
-/* Structured logging with trace context */
-static void log_with_trace(const char *level, const char *trace_id, const char *span_id,
-                           const char *message) {
+/* Log with OTLP export */
+static void log_otlp(log_severity_t severity, const char *trace_id, const char *span_id,
+                     const char *message) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
+    uint64_t timestamp_nanos = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 
-    /* Output in JSON format for easy parsing by log collectors */
-    printf("{\"timestamp\":\"%ld.%09ld\",\"level\":\"%s\",\"service\":\"%s\","
-           "\"trace_id\":\"%s\",\"span_id\":\"%s\",\"message\":\"%s\"}\n",
-           ts.tv_sec, ts.tv_nsec, level, g_service_name,
-           trace_id ? trace_id : "", span_id ? span_id : "", message);
+    /* Also print to stdout for debugging */
+    const char *level_str;
+    switch (severity) {
+        case LOG_SEVERITY_DEBUG: level_str = "DEBUG"; break;
+        case LOG_SEVERITY_INFO: level_str = "INFO"; break;
+        case LOG_SEVERITY_WARN: level_str = "WARN"; break;
+        case LOG_SEVERITY_ERROR: level_str = "ERROR"; break;
+        case LOG_SEVERITY_FATAL: level_str = "FATAL"; break;
+        default: level_str = "INFO"; break;
+    }
+    printf("[%s] %s | trace_id=%s span_id=%s\n", level_str, message,
+           trace_id ? trace_id : "", span_id ? span_id : "");
     fflush(stdout);
+
+    /* Export to OTLP if exporter is available */
+    if (g_log_exporter) {
+        otlp_log_record_t record = {0};
+        record.trace_id = trace_id;
+        record.span_id = span_id;
+        record.severity = severity;
+        record.body = message;
+        record.timestamp_nanos = timestamp_nanos;
+
+        /* Add service attribute */
+        log_attribute_t attrs[1];
+        attrs[0].key = "service.name";
+        attrs[0].string_value = g_service_name;
+        record.attributes = attrs;
+        record.attribute_count = 1;
+
+        otlp_export_log(g_log_exporter, &record);
+    }
 }
 
 /* Request context for async handling */
@@ -161,7 +190,7 @@ static void handle_fetch_legacy_data(call_context_t *ctx) {
     char log_msg[256];
     snprintf(log_msg, sizeof(log_msg), "FetchLegacyData called - record_id: %s, table: %s",
              record_id, table_name);
-    log_with_trace("INFO", trace_id, span_id, log_msg);
+    log_otlp(LOG_SEVERITY_INFO, trace_id, span_id, log_msg);
 
     /* Simulate DB lookup delay */
     simulate_db_delay();
@@ -254,10 +283,10 @@ static void handle_fetch_legacy_data(call_context_t *ctx) {
     double duration_ms = (end_time - start_time) / 1000000.0;
 
     snprintf(log_msg, sizeof(log_msg), "Record fetched successfully (duration: %.2fms)", duration_ms);
-    log_with_trace("INFO", trace_id, span_id, log_msg);
+    log_otlp(LOG_SEVERITY_INFO, trace_id, span_id, log_msg);
 
     /* Export trace span */
-    if (g_exporter != NULL) {
+    if (g_trace_exporter != NULL) {
         otlp_span_t span = {0};
         span.trace_id = trace_id;
         span.span_id = span_id;
@@ -282,7 +311,7 @@ static void handle_fetch_legacy_data(call_context_t *ctx) {
         span.attributes = attrs;
         span.attribute_count = 4;
 
-        otlp_export_span(g_exporter, &span);
+        otlp_export_span(g_trace_exporter, &span);
     }
 
     /* Cleanup */
@@ -460,27 +489,42 @@ int main(int argc, char **argv) {
     const char *otel_endpoint = getenv("OTEL_EXPORTER_OTLP_ENDPOINT");
     const char *service_name = getenv("OTEL_SERVICE_NAME");
     if (!service_name) service_name = "service-f";
+    g_service_name = service_name;
 
     /* Seed random number generator */
     srand(time(NULL));
 
     printf("[Service F] Starting gRPC server...\n");
 
-    /* Initialize OTLP exporter */
+    /* Initialize OTLP exporters */
     if (otel_endpoint) {
-        g_exporter = otlp_exporter_create(otel_endpoint, service_name);
-        if (g_exporter) {
-            printf("[Service F] OTLP exporter initialized: %s\n", otel_endpoint);
+        g_trace_exporter = otlp_exporter_create(otel_endpoint, service_name);
+        if (g_trace_exporter) {
+            printf("[Service F] OTLP trace exporter initialized: %s\n", otel_endpoint);
         } else {
-            fprintf(stderr, "[Service F] Warning: Failed to initialize OTLP exporter\n");
+            fprintf(stderr, "[Service F] Warning: Failed to initialize OTLP trace exporter\n");
+        }
+
+        g_log_exporter = otlp_log_exporter_create(otel_endpoint, service_name);
+        if (g_log_exporter) {
+            printf("[Service F] OTLP log exporter initialized: %s\n", otel_endpoint);
+        } else {
+            fprintf(stderr, "[Service F] Warning: Failed to initialize OTLP log exporter\n");
         }
     }
 
     run_server(port);
 
-    /* Cleanup exporter */
-    if (g_exporter) {
-        otlp_exporter_destroy(g_exporter);
+    /* Cleanup exporters */
+    g_shutdown = 1;
+
+    if (g_log_exporter) {
+        otlp_log_exporter_flush(g_log_exporter);
+        otlp_log_exporter_destroy(g_log_exporter);
+    }
+
+    if (g_trace_exporter) {
+        otlp_exporter_destroy(g_trace_exporter);
     }
 
     return 0;

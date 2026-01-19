@@ -70,11 +70,11 @@ WORKDIR /app
 # Copy proto files
 COPY proto/ ./proto/
 
-# Download OpenTelemetry proto files
+# Download OpenTelemetry proto files (v0.20.0 for protobuf-c compatibility - no optional fields)
 RUN mkdir -p otlp-proto && \
     cd otlp-proto && \
     curl -L -o opentelemetry-proto.tar.gz \
-        https://github.com/open-telemetry/opentelemetry-proto/archive/refs/tags/v1.0.0.tar.gz && \
+        https://github.com/open-telemetry/opentelemetry-proto/archive/refs/tags/v0.20.0.tar.gz && \
     tar -xzf opentelemetry-proto.tar.gz --strip-components=1 && \
     rm opentelemetry-proto.tar.gz
 
@@ -84,13 +84,15 @@ RUN mkdir -p generated && \
              --c_out=./generated \
              ./proto/common.proto ./proto/services.proto
 
-# Generate protobuf-c files for OTLP
+# Generate protobuf-c files for OTLP (traces and logs - metrics excluded due to proto3 optional incompatibility)
 RUN protoc-c --proto_path=./otlp-proto \
              --c_out=./generated \
              ./otlp-proto/opentelemetry/proto/common/v1/common.proto \
              ./otlp-proto/opentelemetry/proto/resource/v1/resource.proto \
              ./otlp-proto/opentelemetry/proto/trace/v1/trace.proto \
-             ./otlp-proto/opentelemetry/proto/collector/trace/v1/trace_service.proto
+             ./otlp-proto/opentelemetry/proto/collector/trace/v1/trace_service.proto \
+             ./otlp-proto/opentelemetry/proto/logs/v1/logs.proto \
+             ./otlp-proto/opentelemetry/proto/collector/logs/v1/logs_service.proto
 
 # Copy source files
 COPY services/service-f/src/ ./src/
@@ -107,18 +109,22 @@ RUN find /usr/local/lib -name "libabsl*" -type f 2>/dev/null | head -30 || echo 
 
 # Compile the service using shared libraries
 # Build gRPC with shared libs enabled, link against them
+# Note: Metrics exporter excluded due to protobuf-c proto3 optional incompatibility
 RUN g++ -O2 -Wall \
     -I./generated \
     -I./src \
     -I/usr/local/include \
     -x c src/main.c \
     -x c src/otlp_exporter.c \
+    -x c src/otlp_log_exporter.c \
     -x c generated/common.pb-c.c \
     -x c generated/services.pb-c.c \
     -x c generated/opentelemetry/proto/common/v1/common.pb-c.c \
     -x c generated/opentelemetry/proto/resource/v1/resource.pb-c.c \
     -x c generated/opentelemetry/proto/trace/v1/trace.pb-c.c \
     -x c generated/opentelemetry/proto/collector/trace/v1/trace_service.pb-c.c \
+    -x c generated/opentelemetry/proto/logs/v1/logs.pb-c.c \
+    -x c generated/opentelemetry/proto/collector/logs/v1/logs_service.pb-c.c \
     -o service-f \
     -L/usr/local/lib \
     -lgrpc -lgpr -lprotobuf-c \
