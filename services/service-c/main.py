@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import random
 import time
@@ -8,14 +9,19 @@ import grpc
 from grpc import aio
 
 from opentelemetry import trace, metrics
+from opentelemetry._logs import set_logger_provider
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+from opentelemetry.sdk._logs import LoggerProvider, LoggingHandler
+from opentelemetry.sdk._logs.export import BatchLogRecordProcessor
 from opentelemetry.sdk.resources import SERVICE_NAME, Resource
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+from opentelemetry.exporter.otlp.proto.grpc._log_exporter import OTLPLogExporter
 from opentelemetry.instrumentation.grpc import GrpcInstrumentorClient, GrpcInstrumentorServer
+from opentelemetry.instrumentation.logging import LoggingInstrumentor
 from opentelemetry.trace import Status, StatusCode
 
 import services_pb2
@@ -24,7 +30,7 @@ import common_pb2
 
 
 def init_telemetry():
-    """Initialize OpenTelemetry tracing and metrics."""
+    """Initialize OpenTelemetry tracing, metrics, and logging."""
     service_name = os.environ.get("OTEL_SERVICE_NAME", "service-c")
     otlp_endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
 
@@ -42,6 +48,20 @@ def init_telemetry():
     meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
     metrics.set_meter_provider(meter_provider)
 
+    # Logging
+    log_exporter = OTLPLogExporter(endpoint=otlp_endpoint, insecure=True)
+    logger_provider = LoggerProvider(resource=resource)
+    logger_provider.add_log_record_processor(BatchLogRecordProcessor(log_exporter))
+    set_logger_provider(logger_provider)
+
+    # Add OTLP handler to Python logging
+    handler = LoggingHandler(level=logging.INFO, logger_provider=logger_provider)
+    logging.getLogger().addHandler(handler)
+    logging.getLogger().setLevel(logging.INFO)
+
+    # Instrument logging to add trace context
+    LoggingInstrumentor().instrument(set_logging_format=True)
+
     # Instrument gRPC
     GrpcInstrumentorClient().instrument()
     GrpcInstrumentorServer().instrument()
@@ -50,6 +70,9 @@ def init_telemetry():
 
 
 tracer, meter = init_telemetry()
+
+# Get logger for this module
+log = logging.getLogger("service-c")
 
 # Metrics
 request_counter = meter.create_counter(
@@ -76,8 +99,8 @@ class ServiceCServicer(services_pb2_grpc.ServiceCServicer):
         self.service_f_channel = grpc.insecure_channel(service_f_addr)
         self.service_f_stub = services_pb2_grpc.ServiceFStub(self.service_f_channel)
 
-        print(f"[Service C] Connected to Service D at {service_d_addr}")
-        print(f"[Service C] Connected to Service F at {service_f_addr}")
+        log.info(f"Connected to Service D at {service_d_addr}")
+        log.info(f"Connected to Service F at {service_f_addr}")
 
     def RunAnalytics(self, request, context):
         """Run analytics/ML inference."""
@@ -89,8 +112,8 @@ class ServiceCServicer(services_pb2_grpc.ServiceCServicer):
             span.set_attribute("rpc.method", "RunAnalytics")
             span.set_attribute("model_name", request.model_name)
 
-            print(f"[Service C] RunAnalytics called - model: {request.model_name}, "
-                  f"input_id: {request.input_data.id if request.input_data else 'N/A'}")
+            log.info(f"RunAnalytics called - model: {request.model_name}, "
+                     f"input_id: {request.input_data.id if request.input_data else 'N/A'}")
 
             # Simulate ML inference delay (15-25ms)
             inference_delay = random.uniform(15, 25) / 1000
@@ -113,13 +136,13 @@ class ServiceCServicer(services_pb2_grpc.ServiceCServicer):
                         validation_result = validation_future.result(timeout=5.0)
                     except Exception as e:
                         errors.append(f"Service D error: {str(e)}")
-                        print(f"[Service C] Service D call failed: {e}")
+                        log.error(f"Service D call failed: {e}")
 
                     try:
                         legacy_result = legacy_future.result(timeout=5.0)
                     except Exception as e:
                         errors.append(f"Service F error: {str(e)}")
-                        print(f"[Service C] Service F call failed: {e}")
+                        log.error(f"Service F call failed: {e}")
 
                 parallel_span.set_attribute("validation_success", validation_result is not None)
                 parallel_span.set_attribute("legacy_success", legacy_result is not None)
@@ -153,8 +176,8 @@ class ServiceCServicer(services_pb2_grpc.ServiceCServicer):
             span.set_attribute("duration_ms", duration_ms)
             span.set_attribute("confidence_score", response.result.confidence_score)
 
-            print(f"[Service C] Analytics complete (duration: {duration_ms:.2f}ms, "
-                  f"confidence: {response.result.confidence_score:.3f})")
+            log.info(f"Analytics complete (duration: {duration_ms:.2f}ms, "
+                     f"confidence: {response.result.confidence_score:.3f})")
 
             return response
 
@@ -166,7 +189,7 @@ class ServiceCServicer(services_pb2_grpc.ServiceCServicer):
             validation_request.data.id = request.input_data.id if request.input_data else "analytics-input"
             validation_request.data.content = f"Analytics input for {request.model_name}"
 
-            print("[Service C] Calling Service D for validation...")
+            log.info("Calling Service D for validation")
             response = self.service_d_stub.ValidateData(validation_request, timeout=5.0)
 
             span.set_attribute("is_valid", response.is_valid)
@@ -180,7 +203,7 @@ class ServiceCServicer(services_pb2_grpc.ServiceCServicer):
             legacy_request.record_id = request.input_data.id if request.input_data else "default-record"
             legacy_request.table_name = "analytics_reference"
 
-            print("[Service C] Calling Service F for legacy data...")
+            log.info("Calling Service F for legacy data")
             response = self.service_f_stub.FetchLegacyData(legacy_request, timeout=5.0)
 
             span.set_attribute("record_id", legacy_request.record_id)
@@ -194,8 +217,8 @@ def serve():
     services_pb2_grpc.add_ServiceCServicer_to_server(ServiceCServicer(), server)
     server.add_insecure_port(f"0.0.0.0:{port}")
 
-    print(f"[Service C] Starting gRPC server on port {port}")
-    print("[Service C] Analytics service (Python) ready")
+    log.info(f"Starting gRPC server on port {port}")
+    log.info("Analytics service (Python) ready")
 
     server.start()
     server.wait_for_termination()

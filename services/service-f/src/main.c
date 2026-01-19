@@ -35,6 +35,21 @@ static grpc_server *g_server = NULL;
 static grpc_completion_queue *g_cq = NULL;
 static int g_shutdown = 0;
 static otlp_exporter_t *g_exporter = NULL;
+static const char *g_service_name = "service-f";
+
+/* Structured logging with trace context */
+static void log_with_trace(const char *level, const char *trace_id, const char *span_id,
+                           const char *message) {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+
+    /* Output in JSON format for easy parsing by log collectors */
+    printf("{\"timestamp\":\"%ld.%09ld\",\"level\":\"%s\",\"service\":\"%s\","
+           "\"trace_id\":\"%s\",\"span_id\":\"%s\",\"message\":\"%s\"}\n",
+           ts.tv_sec, ts.tv_nsec, level, g_service_name,
+           trace_id ? trace_id : "", span_id ? span_id : "", message);
+    fflush(stdout);
+}
 
 /* Request context for async handling */
 typedef struct {
@@ -143,8 +158,10 @@ static void handle_fetch_legacy_data(call_context_t *ctx) {
     const char *record_id = request && request->record_id ? request->record_id : "unknown";
     const char *table_name = request && request->table_name ? request->table_name : "unknown";
 
-    printf("[Service F] FetchLegacyData called - record_id: %s, table: %s\n",
-           record_id, table_name);
+    char log_msg[256];
+    snprintf(log_msg, sizeof(log_msg), "FetchLegacyData called - record_id: %s, table: %s",
+             record_id, table_name);
+    log_with_trace("INFO", trace_id, span_id, log_msg);
 
     /* Simulate DB lookup delay */
     simulate_db_delay();
@@ -236,7 +253,8 @@ static void handle_fetch_legacy_data(call_context_t *ctx) {
     uint64_t end_time = get_time_nanos();
     double duration_ms = (end_time - start_time) / 1000000.0;
 
-    printf("[Service F] Record fetched successfully (duration: %.2fms)\n", duration_ms);
+    snprintf(log_msg, sizeof(log_msg), "Record fetched successfully (duration: %.2fms)", duration_ms);
+    log_with_trace("INFO", trace_id, span_id, log_msg);
 
     /* Export trace span */
     if (g_exporter != NULL) {

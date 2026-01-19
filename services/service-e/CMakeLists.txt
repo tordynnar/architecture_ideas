@@ -66,7 +66,9 @@ target_link_libraries(service-e PRIVATE
     protobuf::libprotobuf
     opentelemetry-cpp::trace
     opentelemetry-cpp::metrics
+    opentelemetry-cpp::logs
     opentelemetry-cpp::otlp_grpc_exporter
     opentelemetry-cpp::otlp_grpc_metrics_exporter
+    opentelemetry-cpp::otlp_grpc_log_record_exporter
     opentelemetry-cpp::ostream_span_exporter
 )

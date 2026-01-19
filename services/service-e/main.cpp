@@ -12,13 +12,17 @@
 
 #include "opentelemetry/exporters/otlp/otlp_grpc_exporter_factory.h"
 #include "opentelemetry/exporters/otlp/otlp_grpc_metric_exporter_factory.h"
+#include "opentelemetry/exporters/otlp/otlp_grpc_log_record_exporter_factory.h"
 #include "opentelemetry/sdk/trace/processor.h"
 #include "opentelemetry/sdk/trace/batch_span_processor_factory.h"
 #include "opentelemetry/sdk/trace/tracer_provider_factory.h"
 #include "opentelemetry/sdk/metrics/meter_provider_factory.h"
 #include "opentelemetry/sdk/metrics/export/periodic_exporting_metric_reader_factory.h"
+#include "opentelemetry/sdk/logs/logger_provider_factory.h"
+#include "opentelemetry/sdk/logs/batch_log_record_processor_factory.h"
 #include "opentelemetry/trace/provider.h"
 #include "opentelemetry/metrics/provider.h"
+#include "opentelemetry/logs/provider.h"
 #include "opentelemetry/sdk/resource/semantic_conventions.h"
 #include "opentelemetry/sdk/resource/resource.h"
 #include "opentelemetry/context/propagation/global_propagator.h"
@@ -28,10 +32,12 @@
 
 namespace trace_api = opentelemetry::trace;
 namespace metrics_api = opentelemetry::metrics;
+namespace logs_api = opentelemetry::logs;
 namespace resource = opentelemetry::sdk::resource;
 namespace otlp = opentelemetry::exporter::otlp;
 namespace trace_sdk = opentelemetry::sdk::trace;
 namespace metrics_sdk = opentelemetry::sdk::metrics;
+namespace logs_sdk = opentelemetry::sdk::logs;
 
 class ServiceEImpl final : public grpcarch::ServiceE::Service {
 public:
@@ -44,6 +50,9 @@ public:
         auto meter = meter_provider->GetMeter("service-e", "1.0.0");
         request_counter_ = meter->CreateUInt64Counter("service_e_requests_total");
         latency_histogram_ = meter->CreateDoubleHistogram("service_e_request_duration_ms");
+
+        auto logger_provider = logs_api::Provider::GetLoggerProvider();
+        logger_ = logger_provider->GetLogger("service-e", "1.0.0");
 
         // Create gRPC channel to Service D
         service_d_stub_ = grpcarch::ServiceD::NewStub(
@@ -66,8 +75,8 @@ public:
         span->SetAttribute("operation", request->operation());
         span->SetAttribute("input_count", static_cast<int>(request->input_values_size()));
 
-        std::cout << "[Service E] Compute called - operation: " << request->operation()
-                  << ", inputs: " << request->input_values_size() << std::endl;
+        LogInfo("Compute called - operation: " + request->operation() +
+                ", inputs: " + std::to_string(request->input_values_size()));
 
         // Simulate computation (8-12ms)
         std::random_device rd;
@@ -114,15 +123,14 @@ public:
             grpcarch::ValidationResponse validation_resp;
             grpc::ClientContext client_ctx;
 
-            std::cout << "[Service E] Calling Service D for validation..." << std::endl;
+            LogInfo("Calling Service D for validation");
             auto validation_status = service_d_stub_->ValidateData(
                 &client_ctx, validation_req, &validation_resp);
 
             if (!validation_status.ok()) {
                 validation_span->SetStatus(trace_api::StatusCode::kError,
                     validation_status.error_message());
-                std::cout << "[Service E] Service D validation failed: "
-                          << validation_status.error_message() << std::endl;
+                LogWarn("Service D validation failed: " + validation_status.error_message());
 
                 // Still return our results, but note the validation failure
                 response->mutable_status()->set_success(false);
@@ -160,8 +168,7 @@ public:
         span->SetStatus(trace_api::StatusCode::kOk);
         span->End();
 
-        std::cout << "[Service E] Computation complete (duration: " << duration_ms << "ms)"
-                  << std::endl;
+        LogInfo("Computation complete (duration: " + std::to_string(duration_ms) + "ms)");
 
         return grpc::Status::OK;
     }
@@ -169,9 +176,22 @@ public:
 private:
     std::string service_d_addr_;
     std::shared_ptr<trace_api::Tracer> tracer_;
+    opentelemetry::nostd::shared_ptr<logs_api::Logger> logger_;
     std::unique_ptr<metrics_api::Counter<uint64_t>> request_counter_;
     std::unique_ptr<metrics_api::Histogram<double>> latency_histogram_;
     std::unique_ptr<grpcarch::ServiceD::Stub> service_d_stub_;
+
+    void LogInfo(const std::string& message) {
+        logger_->EmitLogRecord(logs_api::Severity::kInfo, message);
+    }
+
+    void LogWarn(const std::string& message) {
+        logger_->EmitLogRecord(logs_api::Severity::kWarn, message);
+    }
+
+    void LogError(const std::string& message) {
+        logger_->EmitLogRecord(logs_api::Severity::kError, message);
+    }
 };
 
 void InitTracer() {
@@ -228,6 +248,27 @@ void InitMetrics() {
     metrics_api::Provider::SetMeterProvider(std::move(provider));
 }
 
+void InitLogs() {
+    const char* endpoint = std::getenv("OTEL_EXPORTER_OTLP_ENDPOINT");
+    std::string otlp_endpoint = endpoint ? endpoint : "http://localhost:4317";
+
+    otlp::OtlpGrpcLogRecordExporterOptions opts;
+    opts.endpoint = otlp_endpoint;
+
+    auto exporter = otlp::OtlpGrpcLogRecordExporterFactory::Create(opts);
+
+    auto processor = logs_sdk::BatchLogRecordProcessorFactory::Create(std::move(exporter), {});
+
+    auto resource_attrs = resource::Resource::Create({
+        {resource::SemanticConventions::kServiceName, "service-e"},
+        {resource::SemanticConventions::kServiceVersion, "1.0.0"},
+    });
+
+    auto provider = logs_sdk::LoggerProviderFactory::Create(std::move(processor), resource_attrs);
+
+    logs_api::Provider::SetLoggerProvider(std::move(provider));
+}
+
 void RunServer() {
     const char* port_env = std::getenv("GRPC_PORT");
     std::string port = port_env ? port_env : "50055";
@@ -255,6 +296,7 @@ int main(int argc, char** argv) {
     std::cout << "[Service E] Initializing OpenTelemetry..." << std::endl;
     InitTracer();
     InitMetrics();
+    InitLogs();
 
     std::cout << "[Service E] Starting gRPC server..." << std::endl;
     RunServer();

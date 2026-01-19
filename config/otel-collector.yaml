@@ -23,11 +23,16 @@ processors:
         action: upsert
 
 exporters:
-  # Jaeger exporter for traces
+  # OTLP exporter for traces to Jaeger (Jaeger supports OTLP natively)
   otlp/jaeger:
-    endpoint: jaeger:4317
+    endpoint: jaeger-collector:4317
     tls:
       insecure: true
+
+  # Elasticsearch exporter for logs
+  elasticsearch:
+    endpoints: ["http://elasticsearch:9200"]
+    logs_index: logs-otel
 
   # Prometheus exporter for metrics
   prometheus:
@@ -66,7 +71,7 @@ service:
     logs:
       receivers: [otlp]
       processors: [memory_limiter, batch, resource]
-      exporters: [logging]
+      exporters: [elasticsearch, logging]
 
   telemetry:
     logs:

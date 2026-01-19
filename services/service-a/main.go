@@ -27,6 +27,17 @@ import (
 
 var tracer trace.Tracer
 
+// logWithContext logs a message with trace context
+func logWithContext(ctx context.Context, level, msg string, args ...interface{}) {
+	span := trace.SpanFromContext(ctx)
+	spanCtx := span.SpanContext()
+	traceID := spanCtx.TraceID().String()
+	spanID := spanCtx.SpanID().String()
+
+	fullMsg := fmt.Sprintf(msg, args...)
+	log.Printf("[Service A] [trace_id=%s span_id=%s] %s: %s", traceID, spanID, level, fullMsg)
+}
+
 type server struct {
 	pb.UnimplementedServiceAServer
 	serviceBConn   *grpc.ClientConn
@@ -78,7 +89,7 @@ func (s *server) TriggerWorkload(ctx context.Context, req *pb.WorkloadRequest) (
 		iterations = 50 // Default to 50 iterations
 	}
 
-	log.Printf("[Service A] TriggerWorkload called - iterations: %d", iterations)
+	logWithContext(ctx, "INFO", "TriggerWorkload called - iterations: %d", iterations)
 	span.SetAttributes(attribute.Int("iterations", iterations))
 
 	response := &pb.WorkloadResponse{
@@ -125,7 +136,7 @@ func (s *server) TriggerWorkload(ctx context.Context, req *pb.WorkloadRequest) (
 		attribute.Int("failed_iterations", failCount),
 	)
 
-	log.Printf("[Service A] Workload complete - success: %d, failed: %d", successCount, failCount)
+	logWithContext(ctx, "INFO", "Workload complete - success: %d, failed: %d", successCount, failCount)
 
 	return response, nil
 }
@@ -149,10 +160,10 @@ func (s *server) runIteration(ctx context.Context, iteration int) *pb.IterationR
 	// Call Service B
 	go func() {
 		defer wg.Done()
-		_, bSpan := tracer.Start(ctx, "call-service-b")
+		bCtx, bSpan := tracer.Start(ctx, "call-service-b")
 		defer bSpan.End()
 
-		log.Printf("[Service A] Iteration %d: Calling Service B...", iteration)
+		logWithContext(bCtx, "INFO", "Iteration %d: Calling Service B...", iteration)
 
 		req := &pb.ProcessRequest{
 			Metadata: &pb.RequestMetadata{
@@ -165,20 +176,20 @@ func (s *server) runIteration(ctx context.Context, iteration int) *pb.IterationR
 			},
 		}
 
-		_, bErr = s.serviceBClient.ProcessData(ctx, req)
+		_, bErr = s.serviceBClient.ProcessData(bCtx, req)
 		if bErr != nil {
 			bSpan.RecordError(bErr)
-			log.Printf("[Service A] Iteration %d: Service B error: %v", iteration, bErr)
+			logWithContext(bCtx, "ERROR", "Iteration %d: Service B error: %v", iteration, bErr)
 		}
 	}()
 
 	// Call Service C
 	go func() {
 		defer wg.Done()
-		_, cSpan := tracer.Start(ctx, "call-service-c")
+		cCtx, cSpan := tracer.Start(ctx, "call-service-c")
 		defer cSpan.End()
 
-		log.Printf("[Service A] Iteration %d: Calling Service C...", iteration)
+		logWithContext(cCtx, "INFO", "Iteration %d: Calling Service C...", iteration)
 
 		req := &pb.AnalyticsRequest{
 			Metadata: &pb.RequestMetadata{
@@ -192,10 +203,10 @@ func (s *server) runIteration(ctx context.Context, iteration int) *pb.IterationR
 			ModelName: "default-model",
 		}
 
-		_, cErr = s.serviceCClient.RunAnalytics(ctx, req)
+		_, cErr = s.serviceCClient.RunAnalytics(cCtx, req)
 		if cErr != nil {
 			cSpan.RecordError(cErr)
-			log.Printf("[Service A] Iteration %d: Service C error: %v", iteration, cErr)
+			logWithContext(cCtx, "ERROR", "Iteration %d: Service C error: %v", iteration, cErr)
 		}
 	}()
 
@@ -218,7 +229,7 @@ func (s *server) runIteration(ctx context.Context, iteration int) *pb.IterationR
 		result.ErrorMessage = fmt.Sprintf("Errors: %v", errors)
 	}
 
-	log.Printf("[Service A] Iteration %d complete (duration: %dms, success: %v)",
+	logWithContext(ctx, "INFO", "Iteration %d complete (duration: %dms, success: %v)",
 		iteration, result.DurationMs, result.Success)
 
 	return result
@@ -338,10 +349,10 @@ func main() {
 		}
 		resp, err := srv.TriggerWorkload(ctx, req)
 		if err != nil {
-			log.Printf("[Service A] Startup workload error: %v", err)
+			logWithContext(ctx, "ERROR", "Startup workload error: %v", err)
 			span.RecordError(err)
 		} else {
-			log.Printf("[Service A] Startup workload complete: %d/%d successful",
+			logWithContext(ctx, "INFO", "Startup workload complete: %d/%d successful",
 				resp.SuccessfulIterations, resp.SuccessfulIterations+resp.FailedIterations)
 		}
 	}()

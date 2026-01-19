@@ -39,17 +39,23 @@ builder.Services.AddOpenTelemetry()
         .AddMeter(serviceName)
         .AddOtlpExporter(opts => opts.Endpoint = new Uri(otlpEndpoint)));
 
+// Configure logging
+builder.Logging.ClearProviders();
+builder.Logging.AddConsole();
+
 builder.Services.AddGrpc();
 builder.Services.AddSingleton(new ValidationService.ServiceDMetrics(serviceName));
 builder.Services.AddSingleton(new ValidationService.ErrorRateConfig(errorRate));
 
 var app = builder.Build();
 
+var logger = app.Services.GetRequiredService<ILogger<Program>>();
+
 app.MapGrpcService<ValidationService>();
 app.MapGet("/", () => "Service D (C#) - Validation Service");
 
-Console.WriteLine($"[Service D] Starting gRPC server on port {port}");
-Console.WriteLine($"[Service D] Error rate configured: {errorRate * 100}%");
+logger.LogInformation("Starting gRPC server on port {Port}", port);
+logger.LogInformation("Error rate configured: {ErrorRate}%", errorRate * 100);
 
 app.Run();
 
@@ -59,11 +65,13 @@ public class ValidationService : ServiceD.ServiceDBase
     private readonly ServiceDMetrics _metrics;
     private readonly double _errorRate;
     private readonly Random _random = new();
+    private readonly ILogger<ValidationService> _logger;
 
-    public ValidationService(ServiceDMetrics metrics, ErrorRateConfig errorRateConfig)
+    public ValidationService(ServiceDMetrics metrics, ErrorRateConfig errorRateConfig, ILogger<ValidationService> logger)
     {
         _metrics = metrics;
         _errorRate = errorRateConfig.Value;
+        _logger = logger;
     }
 
     public override async Task<ValidationResponse> ValidateData(
@@ -76,7 +84,7 @@ public class ValidationService : ServiceD.ServiceDBase
         activity?.SetTag("rpc.method", "ValidateData");
 
         var stopwatch = Stopwatch.StartNew();
-        Console.WriteLine($"[Service D] ValidateData called - data_id: {request.Data?.Id}");
+        _logger.LogInformation("ValidateData called - data_id: {DataId}", request.Data?.Id);
 
         // Simulate validation delay (5-10ms)
         var delay = _random.Next(5, 11);
@@ -96,7 +104,7 @@ public class ValidationService : ServiceD.ServiceDBase
             activity?.SetStatus(ActivityStatusCode.Error, "Simulated validation error");
             activity?.SetTag("error", true);
 
-            Console.WriteLine($"[Service D] Simulated error triggered (duration: {duration:F2}ms)");
+            _logger.LogWarning("Simulated error triggered (duration: {Duration}ms)", duration);
 
             throw new RpcException(new Grpc.Core.Status(Grpc.Core.StatusCode.InvalidArgument,
                 "Simulated validation error: Data failed validation checks"));
@@ -118,7 +126,7 @@ public class ValidationService : ServiceD.ServiceDBase
         activity?.SetTag("duration_ms", duration);
         activity?.SetTag("is_valid", true);
 
-        Console.WriteLine($"[Service D] Validation successful (duration: {duration:F2}ms)");
+        _logger.LogInformation("Validation successful (duration: {Duration}ms)", duration);
 
         return response;
     }
