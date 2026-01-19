@@ -276,7 +276,8 @@ int otlp_export_metrics(otlp_metrics_exporter_t *exporter, const otlp_metric_t *
                 data_points[j]->time_unix_nano = dp->timestamp_nanos;
                 data_points[j]->count = dp->count;
                 data_points[j]->sum = dp->sum;
-                data_points[j]->has_sum = 1;
+                /* Note: protobuf-c doesn't generate has_* fields for proto3 optional fields,
+                   but the field will be serialized with its value */
 
                 if (dp->bucket_count > 0 && dp->bucket_counts) {
                     uint64_t *bucket_counts = malloc(dp->bucket_count * sizeof(uint64_t));

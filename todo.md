@@ -20,38 +20,36 @@ All telemetry now working:
 
 ---
 
-### Service F (C) - Traces and Logs ✅
+### Service F (C) - Full Telemetry ✅
 
+All telemetry now working:
 - **Traces**: Working via custom OTLP/gRPC exporter
 - **Logs**: Working via custom OTLP/gRPC exporter
-- **Metrics**: ❌ Not supported (protobuf-c incompatible with proto3 optional fields)
+- **Metrics**: Working via custom OTLP/gRPC exporter
 
 **Implementation**:
-- Custom OTLP log exporter using gRPC C core library
-- Background thread batches and exports logs via OTLP/gRPC
-- Metrics exporter written but excluded from build due to protobuf-c limitations
+- Custom OTLP exporters using gRPC C core library
+- Patched protobuf-c to support proto3 optional fields (required for OTLP metrics proto)
+- Background thread batches and exports metrics every 10 seconds
+
+**Proto3 Optional Field Support**:
+The OTLP metrics proto uses proto3 `optional` fields which protobuf-c doesn't natively support.
+This was solved by patching protobuf-c's code generator to return `FEATURE_PROTO3_OPTIONAL`:
+
+```cpp
+// Added to protoc-c/c_generator.h CGenerator class
+uint64_t GetSupportedFeatures() const override { return FEATURE_PROTO3_OPTIONAL; }
+```
+
+**Note**: While protobuf-c can now compile proto3 optional fields, it doesn't generate `has_*`
+presence-tracking fields. The metrics exporter works around this by always setting values.
 
 **Files**:
-- `services/service-f/src/main.c` - uses OTLP log exporter
+- `services/service-f/Dockerfile` - includes protobuf-c patch for proto3 optional
+- `services/service-f/src/main.c` - uses all three OTLP exporters
 - `services/service-f/src/otlp_exporter.c` - trace exporter
 - `services/service-f/src/otlp_log_exporter.c` - log exporter
-- `services/service-f/src/otlp_metrics_exporter.c` - metrics exporter (not used)
-
----
-
-## Outstanding Items
-
-### Service F Metrics
-
-**Issue**: protobuf-c does not support proto3 `optional` fields used in OpenTelemetry metrics protos.
-
-**Potential Fixes**:
-1. Wait for protobuf-c to add proto3 optional support
-2. Use an older OpenTelemetry proto version without optional fields (none exist)
-3. Fork and modify OTLP metrics proto to remove optional fields
-4. Rewrite Service F in a language with better protobuf support
-
-**Priority**: Low - Service F has traces and logs which cover most observability needs.
+- `services/service-f/src/otlp_metrics_exporter.c` - metrics exporter
 
 ---
 
@@ -64,4 +62,6 @@ All telemetry now working:
 | service-c | Python | ✅ | ✅ | ✅ |
 | service-d | C# | ✅ | ✅ | ✅ |
 | service-e | C++ | ✅ | ✅ | ✅ |
-| service-f | C | ✅ | ✅ | ❌ |
+| service-f | C | ✅ | ✅ | ✅ |
+
+**All services now have full observability coverage!**

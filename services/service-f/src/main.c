@@ -30,6 +30,7 @@
 #include "common.pb-c.h"
 #include "otlp_exporter.h"
 #include "otlp_log_exporter.h"
+#include "otlp_metrics_exporter.h"
 
 /* Server state */
 static grpc_server *g_server = NULL;
@@ -37,7 +38,14 @@ static grpc_completion_queue *g_cq = NULL;
 static int g_shutdown = 0;
 static otlp_exporter_t *g_trace_exporter = NULL;
 static otlp_log_exporter_t *g_log_exporter = NULL;
+static otlp_metrics_exporter_t *g_metrics_exporter = NULL;
 static const char *g_service_name = "service-f";
+
+/* Metrics state */
+static pthread_mutex_t g_metrics_mutex = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t g_request_count = 0;
+static double g_total_duration_ms = 0;
+static pthread_t g_metrics_thread;
 
 /* Log with OTLP export */
 static void log_otlp(log_severity_t severity, const char *trace_id, const char *span_id,
@@ -78,6 +86,76 @@ static void log_otlp(log_severity_t severity, const char *trace_id, const char *
 
         otlp_export_log(g_log_exporter, &record);
     }
+}
+
+/* Record request metrics */
+static void record_request_metrics(double duration_ms) {
+    pthread_mutex_lock(&g_metrics_mutex);
+    g_request_count++;
+    g_total_duration_ms += duration_ms;
+    pthread_mutex_unlock(&g_metrics_mutex);
+}
+
+/* Background thread to periodically export metrics */
+static void* metrics_export_thread(void *arg) {
+    (void)arg;
+
+    while (!g_shutdown) {
+        sleep(10); /* Export every 10 seconds */
+
+        if (g_shutdown || !g_metrics_exporter) break;
+
+        /* Get current timestamp */
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        uint64_t timestamp_nanos = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+
+        /* Get and reset metrics atomically */
+        pthread_mutex_lock(&g_metrics_mutex);
+        uint64_t request_count = g_request_count;
+        double total_duration = g_total_duration_ms;
+        pthread_mutex_unlock(&g_metrics_mutex);
+
+        if (request_count == 0) continue;
+
+        /* Create counter data point */
+        metric_data_point_t counter_dp = {0};
+        counter_dp.timestamp_nanos = timestamp_nanos;
+        counter_dp.int_value = (int64_t)request_count;
+        counter_dp.is_double = 0;
+
+        /* Create gauge data point for average duration */
+        metric_data_point_t gauge_dp = {0};
+        gauge_dp.timestamp_nanos = timestamp_nanos;
+        gauge_dp.double_value = request_count > 0 ? total_duration / request_count : 0;
+        gauge_dp.is_double = 1;
+
+        /* Create metrics */
+        otlp_metric_t metrics[2];
+
+        metrics[0].name = "grpcarch_service_f_requests_total";
+        metrics[0].description = "Total number of requests";
+        metrics[0].unit = "1";
+        metrics[0].type = METRIC_TYPE_COUNTER;
+        metrics[0].data_points = &counter_dp;
+        metrics[0].data_point_count = 1;
+        metrics[0].histogram_points = NULL;
+        metrics[0].histogram_point_count = 0;
+
+        metrics[1].name = "grpcarch_service_f_request_duration_ms";
+        metrics[1].description = "Average request duration in milliseconds";
+        metrics[1].unit = "ms";
+        metrics[1].type = METRIC_TYPE_GAUGE;
+        metrics[1].data_points = &gauge_dp;
+        metrics[1].data_point_count = 1;
+        metrics[1].histogram_points = NULL;
+        metrics[1].histogram_point_count = 0;
+
+        /* Export metrics */
+        otlp_export_metrics(g_metrics_exporter, metrics, 2);
+    }
+
+    return NULL;
 }
 
 /* Request context for async handling */
@@ -284,6 +362,9 @@ static void handle_fetch_legacy_data(call_context_t *ctx) {
 
     snprintf(log_msg, sizeof(log_msg), "Record fetched successfully (duration: %.2fms)", duration_ms);
     log_otlp(LOG_SEVERITY_INFO, trace_id, span_id, log_msg);
+
+    /* Record metrics */
+    record_request_metrics(duration_ms);
 
     /* Export trace span */
     if (g_trace_exporter != NULL) {
@@ -511,12 +592,27 @@ int main(int argc, char **argv) {
         } else {
             fprintf(stderr, "[Service F] Warning: Failed to initialize OTLP log exporter\n");
         }
+
+        g_metrics_exporter = otlp_metrics_exporter_create(otel_endpoint, service_name);
+        if (g_metrics_exporter) {
+            printf("[Service F] OTLP metrics exporter initialized: %s\n", otel_endpoint);
+            /* Start metrics export thread */
+            pthread_create(&g_metrics_thread, NULL, metrics_export_thread, NULL);
+        } else {
+            fprintf(stderr, "[Service F] Warning: Failed to initialize OTLP metrics exporter\n");
+        }
     }
 
     run_server(port);
 
     /* Cleanup exporters */
     g_shutdown = 1;
+
+    /* Wait for metrics thread to finish */
+    if (g_metrics_exporter) {
+        pthread_join(g_metrics_thread, NULL);
+        otlp_metrics_exporter_destroy(g_metrics_exporter);
+    }
 
     if (g_log_exporter) {
         otlp_log_exporter_flush(g_log_exporter);

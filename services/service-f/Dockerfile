@@ -53,10 +53,14 @@ RUN git clone --depth 1 --branch v${GRPC_VERSION} https://github.com/grpc/grpc.g
     cmake --install build && \
     ldconfig
 
-# Build protobuf-c
+# Build protobuf-c with proto3 optional field support
 ARG PROTOBUF_C_VERSION=1.5.0
 RUN git clone --depth 1 --branch v${PROTOBUF_C_VERSION} https://github.com/protobuf-c/protobuf-c.git && \
     cd protobuf-c && \
+    # Patch to add proto3 optional field support (see https://github.com/protobuf-c/protobuf-c/issues/476)
+    # Replace the class definition with one that includes GetSupportedFeatures
+    sed -i 's/class PROTOC_C_EXPORT CGenerator : public CodeGenerator {/class PROTOC_C_EXPORT CGenerator : public CodeGenerator {\n public:\n  uint64_t GetSupportedFeatures() const override { return FEATURE_PROTO3_OPTIONAL; }/' protoc-c/c_generator.h && \
+    grep -A 10 "class PROTOC_C_EXPORT CGenerator" protoc-c/c_generator.h && \
     ./autogen.sh && \
     ./configure && \
     make -j$(nproc) && \
@@ -70,11 +74,11 @@ WORKDIR /app
 # Copy proto files
 COPY proto/ ./proto/
 
-# Download OpenTelemetry proto files (v0.20.0 for protobuf-c compatibility - no optional fields)
+# Download OpenTelemetry proto files (v1.0.0 - with patched protobuf-c for proto3 optional support)
 RUN mkdir -p otlp-proto && \
     cd otlp-proto && \
     curl -L -o opentelemetry-proto.tar.gz \
-        https://github.com/open-telemetry/opentelemetry-proto/archive/refs/tags/v0.20.0.tar.gz && \
+        https://github.com/open-telemetry/opentelemetry-proto/archive/refs/tags/v1.0.0.tar.gz && \
     tar -xzf opentelemetry-proto.tar.gz --strip-components=1 && \
     rm opentelemetry-proto.tar.gz
 
@@ -84,7 +88,7 @@ RUN mkdir -p generated && \
              --c_out=./generated \
              ./proto/common.proto ./proto/services.proto
 
-# Generate protobuf-c files for OTLP (traces and logs - metrics excluded due to proto3 optional incompatibility)
+# Generate protobuf-c files for OTLP (traces, logs, and metrics)
 RUN protoc-c --proto_path=./otlp-proto \
              --c_out=./generated \
              ./otlp-proto/opentelemetry/proto/common/v1/common.proto \
@@ -92,7 +96,9 @@ RUN protoc-c --proto_path=./otlp-proto \
              ./otlp-proto/opentelemetry/proto/trace/v1/trace.proto \
              ./otlp-proto/opentelemetry/proto/collector/trace/v1/trace_service.proto \
              ./otlp-proto/opentelemetry/proto/logs/v1/logs.proto \
-             ./otlp-proto/opentelemetry/proto/collector/logs/v1/logs_service.proto
+             ./otlp-proto/opentelemetry/proto/collector/logs/v1/logs_service.proto \
+             ./otlp-proto/opentelemetry/proto/metrics/v1/metrics.proto \
+             ./otlp-proto/opentelemetry/proto/collector/metrics/v1/metrics_service.proto
 
 # Copy source files
 COPY services/service-f/src/ ./src/
@@ -109,7 +115,7 @@ RUN find /usr/local/lib -name "libabsl*" -type f 2>/dev/null | head -30 || echo 
 
 # Compile the service using shared libraries
 # Build gRPC with shared libs enabled, link against them
-# Note: Metrics exporter excluded due to protobuf-c proto3 optional incompatibility
+# Metrics exporter now included with patched protobuf-c proto3 optional support
 RUN g++ -O2 -Wall \
     -I./generated \
     -I./src \
@@ -117,6 +123,7 @@ RUN g++ -O2 -Wall \
     -x c src/main.c \
     -x c src/otlp_exporter.c \
     -x c src/otlp_log_exporter.c \
+    -x c src/otlp_metrics_exporter.c \
     -x c generated/common.pb-c.c \
     -x c generated/services.pb-c.c \
     -x c generated/opentelemetry/proto/common/v1/common.pb-c.c \
@@ -125,6 +132,8 @@ RUN g++ -O2 -Wall \
     -x c generated/opentelemetry/proto/collector/trace/v1/trace_service.pb-c.c \
     -x c generated/opentelemetry/proto/logs/v1/logs.pb-c.c \
     -x c generated/opentelemetry/proto/collector/logs/v1/logs_service.pb-c.c \
+    -x c generated/opentelemetry/proto/metrics/v1/metrics.pb-c.c \
+    -x c generated/opentelemetry/proto/collector/metrics/v1/metrics_service.pb-c.c \
     -o service-f \
     -L/usr/local/lib \
     -lgrpc -lgpr -lprotobuf-c \
