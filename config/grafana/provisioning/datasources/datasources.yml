@@ -21,6 +21,9 @@ datasources:
       esVersion: "8.0.0"
       logMessageField: Body
       logLevelField: SeverityText
+      interval: Daily
+      maxConcurrentShardRequests: 5
+      includeFrozen: false
 
   - name: Jaeger
     type: jaeger
